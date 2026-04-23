@@ -283,6 +283,52 @@ EOF
   chmod 600 "$ENV_FILE"
 }
 
+detect_existing_auth() {
+  # Populates globals:
+  #   DET_OPENAI_SET (0|1) + DET_OPENAI_MASKED
+  #   DET_ANTHROPIC_SET (0|1) + DET_ANTHROPIC_MASKED + DET_ANTHROPIC_BASE
+  #   DET_OPENCLAW_PRESENT (0|1) + DET_OPENCLAW_GATEWAY_PORT
+  #   DET_OPENCLAW_GATEWAY_TOKEN_SET (0|1)
+  #   DET_OPENCLAW_MINIMAX_MODE (oauth|apikey|"")
+  DET_OPENAI_SET=0; DET_OPENAI_MASKED=""
+  DET_ANTHROPIC_SET=0; DET_ANTHROPIC_MASKED=""; DET_ANTHROPIC_BASE=""
+  DET_OPENCLAW_PRESENT=0; DET_OPENCLAW_GATEWAY_PORT=""
+  DET_OPENCLAW_GATEWAY_TOKEN_SET=0; DET_OPENCLAW_MINIMAX_MODE=""
+
+  if [ -n "${OPENAI_API_KEY:-}" ]; then
+    DET_OPENAI_SET=1; DET_OPENAI_MASKED="$(mask "$OPENAI_API_KEY")"
+  fi
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    DET_ANTHROPIC_SET=1; DET_ANTHROPIC_MASKED="$(mask "$ANTHROPIC_API_KEY")"
+    DET_ANTHROPIC_BASE="${ANTHROPIC_BASE_URL:-}"
+  fi
+  if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
+    DET_OPENCLAW_GATEWAY_TOKEN_SET=1
+  fi
+
+  local cfg="$HOME/.openclaw/openclaw.json"
+  if [ -f "$cfg" ]; then
+    DET_OPENCLAW_PRESENT=1
+    DET_OPENCLAW_GATEWAY_PORT="$(python3 -c "
+import json,sys
+try:
+    d=json.load(open(sys.argv[1]))
+    print(d.get('gateway',{}).get('port','') or '')
+except Exception:
+    pass
+" "$cfg" 2>/dev/null || true)"
+    DET_OPENCLAW_MINIMAX_MODE="$(python3 -c "
+import json,sys
+try:
+    d=json.load(open(sys.argv[1]))
+    p=d.get('auth',{}).get('profiles',{}).get('minimax-portal:default',{})
+    print(p.get('mode','') or '')
+except Exception:
+    pass
+" "$cfg" 2>/dev/null || true)"
+  fi
+}
+
 verify_openai() {
   local key="$1"
   [ -z "$key" ] && return 0
@@ -416,40 +462,135 @@ cmd_onboard() {
   fi
   info ""
 
+  # --- Detect existing auth on this machine ---
+  detect_existing_auth
+
   # --- Step 2: OpenAI key ---
-  info "Step 2/6  OpenAI API key (for embeddings only — required for vector search)"
-  info "  Create a RESTRICTED key with only 'Embeddings: Request' enabled:"
-  info "    https://platform.openai.com/api-keys"
-  info "  Leave blank to skip (gbrain falls back to keyword-only search)."
+  info "Step 2/6  OpenAI API key (for embeddings — required for vector search)"
   local openai=""
-  prompt_secret "OpenAI API key (sk-...)" openai
-  [ -n "$openai" ] && info "    got: $(mask "$openai")"
+  if [ "$DET_OPENAI_SET" = "1" ]; then
+    info "  [detected] OPENAI_API_KEY already set in your environment: $DET_OPENAI_MASKED"
+    local reuse=""
+    prompt "Reuse it? [Y/n]" "Y" reuse
+    case "$reuse" in
+      n|N|no|No|NO)
+        prompt_secret "Paste a new OpenAI key (sk-...) or leave blank to skip" openai ;;
+      *)
+        openai="$OPENAI_API_KEY"
+        info "  ✓ keeping $DET_OPENAI_MASKED" ;;
+    esac
+  else
+    info "  Create a RESTRICTED key with only 'Embeddings: Request' enabled:"
+    info "    https://platform.openai.com/api-keys"
+    info "  Leave blank to skip (gbrain falls back to keyword-only search)."
+    prompt_secret "OpenAI API key (sk-...)" openai
+    [ -n "$openai" ] && info "    got: $(mask "$openai")"
+  fi
   info ""
 
-  # --- Step 3: MiniMax / Anthropic-compat key ---
-  info "Step 3/6  MiniMax (or any Anthropic-compat) API key"
-  info "  Used for: query expansion at search time, and \`gbrain agent run\`."
-  info "  Leave blank to skip (search still works without expansion)."
-  local minimax=""
-  prompt_secret "MiniMax API key" minimax
-  [ -n "$minimax" ] && info "    got: $(mask "$minimax")"
+  # --- Step 3: LLM credential (MiniMax / Anthropic-compat) with auth detection ---
+  info "Step 3/6  LLM API credential (query expansion + \`gbrain agent run\`)"
+  info ""
+  info "  Auth scan:"
+  if [ "$DET_ANTHROPIC_SET" = "1" ]; then
+    info "    ✓ ANTHROPIC_API_KEY already set ($DET_ANTHROPIC_MASKED)"
+    [ -n "$DET_ANTHROPIC_BASE" ] && info "      with ANTHROPIC_BASE_URL=$DET_ANTHROPIC_BASE"
+  fi
+  if [ "$DET_OPENCLAW_PRESENT" = "1" ]; then
+    info "    ✓ OpenClaw config at ~/.openclaw/openclaw.json"
+    [ -n "$DET_OPENCLAW_GATEWAY_PORT" ] && info "      gateway on loopback:$DET_OPENCLAW_GATEWAY_PORT"
+    [ "$DET_OPENCLAW_GATEWAY_TOKEN_SET" = "1" ] && info "      OPENCLAW_GATEWAY_TOKEN is set"
+    if [ "$DET_OPENCLAW_MINIMAX_MODE" = "oauth" ]; then
+      info "      minimax-portal auth = oauth (NOTE: OAuth tokens are NOT portable to gbrain)"
+    fi
+  fi
+  if [ "$DET_ANTHROPIC_SET" = "0" ] && [ "$DET_OPENCLAW_PRESENT" = "0" ]; then
+    info "    (no existing LLM auth detected on this machine)"
+  fi
   info ""
 
-  # --- Step 4: base URL + models (only if we have an LLM key) ---
-  local minimax_base="" exp_model="" sub_model=""
+  # Build menu of choices
+  local choices=()
+  local default_choice=""
+  if [ "$DET_ANTHROPIC_SET" = "1" ]; then
+    choices+=("reuse-anthropic"); default_choice="${default_choice:-reuse-anthropic}"
+  fi
+  if [ "$DET_OPENCLAW_GATEWAY_TOKEN_SET" = "1" ] && [ -n "$DET_OPENCLAW_GATEWAY_PORT" ]; then
+    choices+=("openclaw-gateway"); default_choice="${default_choice:-openclaw-gateway}"
+  fi
+  choices+=("paste-key")
+  choices+=("skip")
+  default_choice="${default_choice:-paste-key}"
+
+  info "  Pick credential source:"
+  local idx=1 default_idx=0
+  for c in "${choices[@]}"; do
+    case "$c" in
+      reuse-anthropic)  info "    [$idx] Reuse \$ANTHROPIC_API_KEY ($DET_ANTHROPIC_MASKED)" ;;
+      openclaw-gateway) info "    [$idx] Route through OpenClaw gateway 127.0.0.1:$DET_OPENCLAW_GATEWAY_PORT using \$OPENCLAW_GATEWAY_TOKEN" ;;
+      paste-key)        info "    [$idx] Paste a static API key (MiniMax platform, direct Anthropic, etc.)" ;;
+      skip)             info "    [$idx] Skip (query expansion + agent disabled; search still works)" ;;
+    esac
+    [ "$c" = "$default_choice" ] && default_idx=$idx
+    idx=$((idx+1))
+  done
+
+  local picked=""
+  prompt "Choice" "$default_idx" picked
+  local choice="${choices[$((picked-1))]:-$default_choice}"
+  info ""
+
+  local minimax="" minimax_base="" exp_model="" sub_model=""
+  case "$choice" in
+    reuse-anthropic)
+      minimax="$ANTHROPIC_API_KEY"
+      info "  ✓ reusing \$ANTHROPIC_API_KEY"
+      if [ -n "$DET_ANTHROPIC_BASE" ]; then
+        local keep=""
+        prompt "Keep existing ANTHROPIC_BASE_URL=$DET_ANTHROPIC_BASE? [Y/n]" "Y" keep
+        case "$keep" in
+          n|N|no|No|NO) prompt "New Anthropic-compatible base URL (blank for Anthropic default)" "" minimax_base ;;
+          *)            minimax_base="$DET_ANTHROPIC_BASE" ;;
+        esac
+      else
+        prompt "Anthropic-compatible base URL (blank = Anthropic default)" "" minimax_base
+      fi
+      ;;
+    openclaw-gateway)
+      info "  Using OPENCLAW_GATEWAY_TOKEN as the Anthropic API key."
+      info "  You need the gateway path that exposes an Anthropic-compatible surface."
+      info "  Check your OpenClaw docs — the full URL typically looks like"
+      info "    http://127.0.0.1:$DET_OPENCLAW_GATEWAY_PORT/<some-path>"
+      info ""
+      minimax="$OPENCLAW_GATEWAY_TOKEN"
+      prompt "Gateway Anthropic-compat URL" "http://127.0.0.1:$DET_OPENCLAW_GATEWAY_PORT/anthropic" minimax_base
+      ;;
+    paste-key)
+      info "  For MiniMax direct: create an API key at the MiniMax platform console."
+      info "  Leave blank to skip."
+      prompt_secret "API key" minimax
+      if [ -n "$minimax" ]; then
+        info "    got: $(mask "$minimax")"
+        info "  MiniMax default (verify in their docs): https://api.minimaxi.chat/anthropic"
+        prompt "Anthropic-compatible base URL" "https://api.minimaxi.chat/anthropic" minimax_base
+      fi
+      ;;
+    skip)
+      info "  Skipping LLM credential."
+      ;;
+  esac
+  info ""
+
+  # --- Step 4: model names (only if we have an LLM key) ---
   if [ -n "$minimax" ]; then
-    info "Step 4/6  LLM endpoint + model names"
-    info "  The Anthropic SDK reads ANTHROPIC_BASE_URL to redirect API calls."
-    info "  MiniMax default (verify in their docs): https://api.minimaxi.chat/anthropic"
-    prompt "Anthropic-compatible base URL" "https://api.minimaxi.chat/anthropic" minimax_base
-    info ""
-    info "  Model names override gbrain's hardcoded Claude IDs:"
-    info "    expansion (Haiku  →): MiniMax-M2.7-highspeed  (fastest, tool-use OK)"
-    info "    subagent  (Sonnet →): MiniMax-M2.7            (full-capability)"
+    info "Step 4/6  Model names (override gbrain's hardcoded Claude IDs)"
+    info "    expansion (replaces Haiku ): MiniMax-M2.7-highspeed  (fast, tool-use OK)"
+    info "    subagent  (replaces Sonnet): MiniMax-M2.7            (full-capability)"
+    info "    (or Claude IDs if you're pointing at real Anthropic, or any other provider's names)"
     prompt "Query-expansion model"   "MiniMax-M2.7-highspeed" exp_model
     prompt "Subagent default model"  "MiniMax-M2.7"           sub_model
   else
-    info "Step 4/6  (skipped — no LLM key provided)"
+    info "Step 4/6  (skipped — no LLM credential provided)"
   fi
   info ""
 
