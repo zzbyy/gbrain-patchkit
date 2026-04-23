@@ -1,0 +1,8 @@
+# User data written by the tool at runtime into the install dir.
+# Tracked only as `substitutions.default.json`; the user's live copy is untracked.
+substitutions.json
+env.sh
+apply.log
+
+# macOS
+.DS_Store

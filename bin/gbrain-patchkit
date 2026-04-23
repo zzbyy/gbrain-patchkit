@@ -1,0 +1,522 @@
+#!/usr/bin/env bash
+#
+# gbrain-patchkit — standalone source-patch orchestrator for gbrain
+#
+# Patches gbrain's hardcoded Anthropic model IDs into env-driven overrides so
+# you can point them at MiniMax, a self-hosted litellm gateway, or any other
+# Anthropic-compatible endpoint. Patches auto-reapply after `gbrain upgrade`.
+#
+# Layout:
+#   ~/.gbrain-patchkit/bin/gbrain-patchkit     (this tool)
+#   ~/.gbrain-patchkit/substitutions.json      (editable patch rules)
+#   ~/.gbrain-patchkit/env.sh                  (your keys + models, sourced from ~/.zshrc)
+#   ~/.gbrain-patchkit/apply.log               (append-only audit log)
+#
+# Commands:
+#   onboard            interactive setup (keys, URL, models, patch, verify)
+#   install            non-interactive: write default config + shell hook only
+#   apply [--quiet]    apply every enabled substitution (idempotent)
+#   check              show status of every substitution
+#   revert             undo every substitution
+#   doctor             verify env + patch state
+#   edit               open substitutions.json in $EDITOR
+#   env                open env.sh in $EDITOR
+#   locate             print the resolved gbrain source directory
+#   update             git pull inside the install dir
+#   uninstall          remove shell hook (leaves files for you to rm)
+#   help               show this help
+
+set -euo pipefail
+
+PATCHKIT_HOME="${GBRAIN_PATCHKIT_HOME:-$HOME/.gbrain-patchkit}"
+CONFIG="$PATCHKIT_HOME/substitutions.json"
+CONFIG_DEFAULT="$PATCHKIT_HOME/substitutions.default.json"
+ENV_FILE="$PATCHKIT_HOME/env.sh"
+LOG="$PATCHKIT_HOME/apply.log"
+
+QUIET=0
+FLAGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --quiet) QUIET=1 ;;
+    *)       FLAGS+=("$arg") ;;
+  esac
+done
+
+say()  { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
+info() { printf '%s\n' "$*"; }
+err()  { printf '%s\n' "$*" >&2; }
+
+# --- locate gbrain source ----------------------------------------------------
+
+resolve_gbrain_src() {
+  local override="${GBRAIN_SOURCE_DIR:-}"
+  if [ -n "$override" ]; then
+    if [ -f "$override/package.json" ] && grep -q '"name": "gbrain"' "$override/package.json"; then
+      printf '%s\n' "$override"; return
+    fi
+    err "GBRAIN_SOURCE_DIR set to $override but not a gbrain source tree"
+    exit 1
+  fi
+  if ! command -v gbrain >/dev/null 2>&1; then
+    err "gbrain not on PATH. Install gbrain first, or set GBRAIN_SOURCE_DIR=/path/to/gbrain."
+    exit 1
+  fi
+  local bin real pkg_dir
+  bin="$(command -v gbrain)"
+  real="$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$bin")"
+  pkg_dir="$(dirname "$real")"
+  while [ "$pkg_dir" != "/" ] && [ ! -f "$pkg_dir/package.json" ]; do
+    pkg_dir="$(dirname "$pkg_dir")"
+  done
+  if [ ! -f "$pkg_dir/package.json" ] || ! grep -q '"name": "gbrain"' "$pkg_dir/package.json"; then
+    err "resolved path does not look like a gbrain source tree: $pkg_dir"
+    err "set GBRAIN_SOURCE_DIR=/path/to/gbrain explicitly"
+    exit 1
+  fi
+  printf '%s\n' "$pkg_dir"
+}
+
+# --- substitution engine (python3: config parsing + file I/O) -----------------
+
+run_engine() {
+  python3 - "$@" <<'PY'
+import json, pathlib, sys, datetime
+
+mode, src_dir, config_path, log_path, quiet_flag = sys.argv[1:6]
+quiet = quiet_flag == "1"
+
+def log(msg):
+    try:
+        with open(log_path, "a") as f:
+            ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            f.write(f"{ts} [{mode}] {msg}\n")
+    except Exception:
+        pass
+
+def say(msg):
+    if not quiet:
+        print(msg)
+
+try:
+    cfg = json.loads(pathlib.Path(config_path).read_text())
+except FileNotFoundError:
+    print(f"no config at {config_path}. Run: gbrain-patchkit onboard", file=sys.stderr)
+    sys.exit(1)
+
+substitutions = [s for s in cfg.get("substitutions", []) if s.get("enabled", True)]
+if not substitutions:
+    say("(no enabled substitutions)")
+    sys.exit(0)
+
+src = pathlib.Path(src_dir)
+say(f"[patchkit] source: {src}")
+if mode == "check":
+    say(f"[patchkit] config: {config_path}")
+
+exit_rc = 0
+for s in substitutions:
+    rel = s["file"]; name = s.get("name", rel)
+    find_s = s["find"]; replace_s = s["replace"]; marker = s["marker"]
+    p = src / rel
+
+    if not p.exists():
+        say(f"  MISSING      {rel}  ({name})")
+        log(f"MISSING {rel}"); exit_rc = 2; continue
+
+    text = p.read_text()
+    has_marker = marker in text
+    has_find = find_s in text
+    has_replace = replace_s in text
+
+    if has_marker and has_replace:       status = "patched"
+    elif (not has_marker) and has_find:  status = "unpatched"
+    else:                                status = "drifted"
+
+    if mode == "check":
+        say(f"  {status:<12} {rel}  ({name})"); continue
+
+    if mode == "apply":
+        if status == "patched":
+            say(f"  skip         {rel}  ({name})"); log(f"skip {rel}"); continue
+        if status == "drifted":
+            say(f"  DRIFT        {rel}  ({name}) — neither form found; inspect manually")
+            log(f"DRIFT {rel}"); exit_rc = 3; continue
+        count = text.count(find_s)
+        if count != 1:
+            say(f"  AMBIGUOUS    {rel}  ({name}) — expected 1 match, found {count}")
+            log(f"AMBIGUOUS {rel} matches={count}"); exit_rc = 3; continue
+        tmp = p.with_suffix(p.suffix + ".patchkit.tmp")
+        tmp.write_text(text.replace(find_s, replace_s)); tmp.replace(p)
+        say(f"  applied      {rel}  ({name})"); log(f"applied {rel}"); continue
+
+    if mode == "revert":
+        if status == "unpatched":
+            say(f"  skip         {rel}  ({name})"); log(f"skip {rel}"); continue
+        if status == "drifted":
+            say(f"  DRIFT        {rel}  ({name}) — cannot revert cleanly")
+            log(f"DRIFT {rel}"); exit_rc = 3; continue
+        tmp = p.with_suffix(p.suffix + ".patchkit.tmp")
+        tmp.write_text(text.replace(replace_s, find_s)); tmp.replace(p)
+        say(f"  reverted     {rel}  ({name})"); log(f"reverted {rel}"); continue
+
+    print(f"unknown mode: {mode}", file=sys.stderr); sys.exit(2)
+
+sys.exit(exit_rc)
+PY
+}
+
+# --- helpers -----------------------------------------------------------------
+
+ensure_config() {
+  if [ ! -f "$CONFIG" ]; then
+    if [ -f "$CONFIG_DEFAULT" ]; then
+      cp "$CONFIG_DEFAULT" "$CONFIG"
+      say "[patchkit] seeded config from $CONFIG_DEFAULT"
+    else
+      err "no config at $CONFIG and no default to seed from. Run: gbrain-patchkit onboard"
+      exit 1
+    fi
+  fi
+}
+
+pick_rc_file() {
+  if [ -f "$HOME/.zshrc" ]; then   printf '%s\n' "$HOME/.zshrc"
+  elif [ -f "$HOME/.bashrc" ]; then printf '%s\n' "$HOME/.bashrc"
+  else                              printf '%s\n' "$HOME/.profile"
+  fi
+}
+
+install_shell_hook() {
+  local rc_file; rc_file="$(pick_rc_file)"
+  local marker="# >>> gbrain-patchkit >>>"
+  if grep -qF "$marker" "$rc_file" 2>/dev/null; then
+    say "[install] shell hook already present in $rc_file"
+    return
+  fi
+  cat >> "$rc_file" <<EOF
+
+# >>> gbrain-patchkit >>>
+# Added by gbrain-patchkit. Remove this block between the markers to uninstall.
+export PATH="\$HOME/.gbrain-patchkit/bin:\$PATH"
+[ -f "\$HOME/.gbrain-patchkit/env.sh" ] && . "\$HOME/.gbrain-patchkit/env.sh"
+gbrain() {
+  command gbrain "\$@"
+  local rc=\$?
+  if [ "\${1-}" = "upgrade" ] && [ "\$rc" -eq 0 ]; then
+    command gbrain-patchkit apply --quiet || true
+  fi
+  return \$rc
+}
+# <<< gbrain-patchkit <<<
+EOF
+  say "[install] added PATH export + env source + post-upgrade hook to $rc_file"
+}
+
+remove_shell_hook() {
+  local rc_file; rc_file="$(pick_rc_file)"
+  if ! grep -qF "# >>> gbrain-patchkit >>>" "$rc_file" 2>/dev/null; then
+    say "[uninstall] no hook found in $rc_file"
+    return
+  fi
+  local tmp; tmp="$(mktemp)"
+  python3 - "$rc_file" "$tmp" <<'PY'
+import pathlib, sys
+src, dst = sys.argv[1], sys.argv[2]
+text = pathlib.Path(src).read_text()
+start, end = "# >>> gbrain-patchkit >>>", "# <<< gbrain-patchkit <<<"
+i = text.find(start)
+j = text.find(end, i+1)
+if i == -1 or j == -1:
+    pathlib.Path(dst).write_text(text); sys.exit(0)
+# Also strip the blank line before the block if present
+out = text[:i].rstrip("\n") + "\n" + text[j+len(end):].lstrip("\n")
+pathlib.Path(dst).write_text(out)
+PY
+  mv "$tmp" "$rc_file"
+  say "[uninstall] removed hook block from $rc_file"
+}
+
+mask() {
+  # Mask a secret: show last 4 chars preceded by ****.
+  local v="$1"
+  local n=${#v}
+  if [ "$n" -le 8 ]; then printf '(%d chars)\n' "$n"; return; fi
+  printf '****%s\n' "${v: -4}"
+}
+
+prompt() {
+  # prompt "Question" "default" varname
+  local q="$1" def="$2" var="$3" ans
+  if [ -n "$def" ]; then
+    read -r -p "  $q [$def]: " ans || true
+    printf -v "$var" '%s' "${ans:-$def}"
+  else
+    read -r -p "  $q: " ans || true
+    printf -v "$var" '%s' "$ans"
+  fi
+}
+
+prompt_secret() {
+  # prompt_secret "Question" varname
+  local q="$1" var="$2" ans
+  read -r -s -p "  $q: " ans || true
+  echo
+  printf -v "$var" '%s' "$ans"
+}
+
+write_env_file() {
+  # Args passed as VAR=VAL pairs, one per line in the env file.
+  local openai="$1" minimax="$2" minimax_base="$3" exp_model="$4" sub_model="$5"
+  umask 077
+  cat > "$ENV_FILE" <<EOF
+# ~/.gbrain-patchkit/env.sh — generated by gbrain-patchkit onboard
+# Sourced from your shell rc via the patchkit install block.
+# Safe to hand-edit. Re-run \`gbrain-patchkit onboard --reconfigure\` to rewrite.
+
+EOF
+  [ -n "$openai" ]       && printf 'export OPENAI_API_KEY=%q\n'           "$openai"       >> "$ENV_FILE"
+  [ -n "$minimax" ]      && printf 'export ANTHROPIC_API_KEY=%q\n'        "$minimax"      >> "$ENV_FILE"
+  [ -n "$minimax_base" ] && printf 'export ANTHROPIC_BASE_URL=%q\n'       "$minimax_base" >> "$ENV_FILE"
+  [ -n "$exp_model" ]    && printf 'export GBRAIN_EXPANSION_MODEL=%q\n'   "$exp_model"    >> "$ENV_FILE"
+  [ -n "$sub_model" ]    && printf 'export GBRAIN_SUBAGENT_MODEL=%q\n'    "$sub_model"    >> "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+}
+
+verify_openai() {
+  local key="$1"
+  [ -z "$key" ] && return 0
+  if ! command -v curl >/dev/null 2>&1; then return 0; fi
+  local status
+  status="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer $key" \
+    -H "Content-Type: application/json" \
+    --data '{"model":"text-embedding-3-large","input":"ping"}' \
+    https://api.openai.com/v1/embeddings 2>/dev/null || true)"
+  case "$status" in
+    200) info "  ✓ OpenAI key works for embeddings" ;;
+    401) info "  ✗ OpenAI key rejected (401 Unauthorized). Check for typos or revoked keys." ;;
+    403) info "  ✗ OpenAI key scoped too narrowly (403). Make sure Embeddings: Request is enabled." ;;
+    000) info "  ? OpenAI reachability check failed (network). Skipping." ;;
+    *)   info "  ? OpenAI probe returned HTTP $status. Not fatal, but unexpected." ;;
+  esac
+}
+
+# --- commands ----------------------------------------------------------------
+
+cmd_apply() {
+  ensure_config
+  local src; src="$(resolve_gbrain_src)"
+  run_engine apply "$src" "$CONFIG" "$LOG" "$QUIET"
+}
+cmd_check() {
+  ensure_config
+  local src; src="$(resolve_gbrain_src)"
+  run_engine check "$src" "$CONFIG" "$LOG" "0"
+}
+cmd_revert() {
+  ensure_config
+  local src; src="$(resolve_gbrain_src)"
+  run_engine revert "$src" "$CONFIG" "$LOG" "$QUIET"
+}
+cmd_edit()    { ensure_config; "${EDITOR:-open -t}" "$CONFIG"; }
+cmd_env_cmd() { touch "$ENV_FILE"; chmod 600 "$ENV_FILE"; "${EDITOR:-open -t}" "$ENV_FILE"; }
+cmd_locate()  { resolve_gbrain_src; }
+
+cmd_update() {
+  if [ ! -d "$PATCHKIT_HOME/.git" ]; then
+    err "not a git clone. Re-run the curl installer to update."
+    exit 1
+  fi
+  git -C "$PATCHKIT_HOME" pull --ff-only
+}
+
+cmd_install() {
+  ensure_config
+  install_shell_hook
+  : > "$LOG" 2>/dev/null || true
+  say
+  say "Config seeded and shell hook installed."
+  say "For interactive setup of keys + models, run:  gbrain-patchkit onboard"
+}
+
+cmd_uninstall() {
+  remove_shell_hook
+  info ""
+  info "Hook removed. Your env file, config, and install dir are still at:"
+  info "  $ENV_FILE"
+  info "  $CONFIG"
+  info "  $PATCHKIT_HOME"
+  info "Delete them manually if you want a clean wipe:  rm -rf $PATCHKIT_HOME"
+}
+
+cmd_doctor() {
+  info "[doctor] tool home:       $PATCHKIT_HOME"
+  info "[doctor] config:          $([ -f "$CONFIG" ] && echo present || echo MISSING)"
+  info "[doctor] env file:        $([ -f "$ENV_FILE" ] && echo present || echo MISSING)"
+  # Source env file locally for the probe if it exists
+  if [ -f "$ENV_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$ENV_FILE"
+  fi
+  local vars=(OPENAI_API_KEY ANTHROPIC_API_KEY ANTHROPIC_BASE_URL GBRAIN_EXPANSION_MODEL GBRAIN_SUBAGENT_MODEL)
+  for v in "${vars[@]}"; do
+    local val="${!v-}"
+    if [ -z "$val" ]; then
+      printf '  %-26s (unset)\n' "$v"
+    elif [[ "$v" == *_API_KEY ]]; then
+      printf '  %-26s %s\n' "$v" "$(mask "$val")"
+    else
+      printf '  %-26s %s\n' "$v" "$val"
+    fi
+  done
+  info ""
+  if command -v gbrain >/dev/null 2>&1; then
+    info "[doctor] gbrain on PATH:  $(command -v gbrain)"
+  else
+    info "[doctor] gbrain on PATH:  (not found)"
+  fi
+  info ""
+  info "[doctor] patch status:"
+  cmd_check || true
+}
+
+cmd_onboard() {
+  local reconfigure=0
+  for f in "${FLAGS[@]:-}"; do
+    [ "$f" = "--reconfigure" ] && reconfigure=1
+  done
+
+  info ""
+  info "=================================================================="
+  info "  gbrain-patchkit onboarding"
+  info "=================================================================="
+  info ""
+  info "This wizard will:"
+  info "  1. Locate your gbrain install"
+  info "  2. Collect API keys (OpenAI for embeddings; MiniMax/etc for LLM)"
+  info "  3. Collect an Anthropic-compatible base URL + model names"
+  info "  4. Write env file + shell hook"
+  info "  5. Apply the model-override patches to gbrain source"
+  info "  6. Verify everything"
+  info ""
+  info "All keys are stored in $ENV_FILE with 600 perms. Nothing leaves your machine."
+  info ""
+
+  # --- Step 1: locate gbrain ---
+  info "Step 1/6  Locate gbrain"
+  local src=""
+  if src="$(resolve_gbrain_src 2>/dev/null)"; then
+    info "  ✓ Found gbrain source at: $src"
+  else
+    info "  ✗ gbrain not found on PATH."
+    info "    Install it first:  bun install -g github:garrytan/gbrain"
+    info "    Or export GBRAIN_SOURCE_DIR=/path/to/your/gbrain checkout and re-run onboard."
+    exit 1
+  fi
+  info ""
+
+  # --- Step 2: OpenAI key ---
+  info "Step 2/6  OpenAI API key (for embeddings only — required for vector search)"
+  info "  Create a RESTRICTED key with only 'Embeddings: Request' enabled:"
+  info "    https://platform.openai.com/api-keys"
+  info "  Leave blank to skip (gbrain falls back to keyword-only search)."
+  local openai=""
+  prompt_secret "OpenAI API key (sk-...)" openai
+  [ -n "$openai" ] && info "    got: $(mask "$openai")"
+  info ""
+
+  # --- Step 3: MiniMax / Anthropic-compat key ---
+  info "Step 3/6  MiniMax (or any Anthropic-compat) API key"
+  info "  Used for: query expansion at search time, and \`gbrain agent run\`."
+  info "  Leave blank to skip (search still works without expansion)."
+  local minimax=""
+  prompt_secret "MiniMax API key" minimax
+  [ -n "$minimax" ] && info "    got: $(mask "$minimax")"
+  info ""
+
+  # --- Step 4: base URL + models (only if we have an LLM key) ---
+  local minimax_base="" exp_model="" sub_model=""
+  if [ -n "$minimax" ]; then
+    info "Step 4/6  LLM endpoint + model names"
+    info "  The Anthropic SDK reads ANTHROPIC_BASE_URL to redirect API calls."
+    info "  MiniMax default (verify in their docs): https://api.minimaxi.chat/anthropic"
+    prompt "Anthropic-compatible base URL" "https://api.minimaxi.chat/anthropic" minimax_base
+    info ""
+    info "  Model names override gbrain's hardcoded Claude IDs:"
+    info "    expansion (Haiku  →): MiniMax-M2.7-highspeed  (fastest, tool-use OK)"
+    info "    subagent  (Sonnet →): MiniMax-M2.7            (full-capability)"
+    prompt "Query-expansion model"   "MiniMax-M2.7-highspeed" exp_model
+    prompt "Subagent default model"  "MiniMax-M2.7"           sub_model
+  else
+    info "Step 4/6  (skipped — no LLM key provided)"
+  fi
+  info ""
+
+  # --- Step 5: write files + install hook ---
+  info "Step 5/6  Write env + install shell hook + apply patches"
+  write_env_file "$openai" "$minimax" "$minimax_base" "$exp_model" "$sub_model"
+  info "  ✓ wrote $ENV_FILE"
+  install_shell_hook
+  ensure_config
+  # Source env so apply runs with user's settings available for any future hooks
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  run_engine apply "$src" "$CONFIG" "$LOG" "0" || true
+  info ""
+
+  # --- Step 6: verify ---
+  info "Step 6/6  Verify"
+  [ -n "$openai" ] && verify_openai "$openai"
+  info ""
+
+  # --- Done ---
+  info "=================================================================="
+  info "  Setup complete."
+  info "=================================================================="
+  info ""
+  info "Reload your shell to pick up env + hook:"
+  info "  source $(pick_rc_file)"
+  info ""
+  info "Then try:"
+  info "  gbrain doctor"
+  info "  gbrain search \"your query at least three words\""
+  info ""
+  info "Other useful commands:"
+  info "  gbrain-patchkit doctor       verify env + patch state"
+  info "  gbrain-patchkit check        show patch status"
+  info "  gbrain-patchkit env          edit your keys / models"
+  info "  gbrain-patchkit edit         edit substitutions.json"
+  info "  gbrain-patchkit revert       undo patches"
+  info "  gbrain-patchkit uninstall    remove shell hook"
+  info ""
+}
+
+cmd_help() {
+  # Print the leading comment block: lines starting at the first non-shebang
+  # comment, stopping at the first blank or non-comment line.
+  awk 'NR==1 && /^#!/ {next}
+       /^#/ {sub(/^# ?/,""); print; next}
+       {exit}' "$0"
+}
+
+main() {
+  local cmd="${FLAGS[0]:-help}"
+  case "$cmd" in
+    onboard)   cmd_onboard ;;
+    install)   cmd_install ;;
+    apply)     cmd_apply ;;
+    check)     cmd_check ;;
+    revert)    cmd_revert ;;
+    doctor)    cmd_doctor ;;
+    edit)      cmd_edit ;;
+    env)       cmd_env_cmd ;;
+    locate)    cmd_locate ;;
+    update)    cmd_update ;;
+    uninstall) cmd_uninstall ;;
+    help|-h|--help) cmd_help ;;
+    *) err "unknown command: $cmd"; cmd_help; exit 2 ;;
+  esac
+}
+
+main

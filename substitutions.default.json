@@ -1,0 +1,21 @@
+{
+  "description": "Default gbrain source substitutions. Each entry turns a hardcoded model ID into an env-driven override so you can point gbrain at any Anthropic-compatible endpoint (MiniMax, self-hosted litellm, etc.). The `marker` must appear in `replace` but NOT in `find` — that's how the tool detects already-patched state so it's safe to re-run after every `gbrain upgrade`. Set `enabled: false` on any entry to keep the definition but stop applying it.",
+  "substitutions": [
+    {
+      "name": "env-driven expansion model",
+      "enabled": true,
+      "file": "src/core/search/expansion.ts",
+      "marker": "GBRAIN_EXPANSION_MODEL",
+      "find": "model: 'claude-haiku-4-5-20251001',",
+      "replace": "model: process.env.GBRAIN_EXPANSION_MODEL ?? 'claude-haiku-4-5-20251001',"
+    },
+    {
+      "name": "env-driven subagent default model",
+      "enabled": true,
+      "file": "src/core/minions/handlers/subagent.ts",
+      "marker": "GBRAIN_SUBAGENT_MODEL",
+      "find": "const DEFAULT_MODEL = 'claude-sonnet-4-6';",
+      "replace": "const DEFAULT_MODEL = process.env.GBRAIN_SUBAGENT_MODEL ?? 'claude-sonnet-4-6';"
+    }
+  ]
+}
