@@ -189,14 +189,51 @@ pick_rc_file() {
 
 install_shell_hook() {
   local rc_file; rc_file="$(pick_rc_file)"
-  local marker="# >>> gbrain-patchkit >>>"
-  if grep -qF "$marker" "$rc_file" 2>/dev/null; then
-    say "[install] shell hook already present in $rc_file"
+  local start="# >>> gbrain-patchkit >>>"
+  local end="# <<< gbrain-patchkit <<<"
+  # Sentinel present in the current hook version but not in older hooks — lets
+  # us detect stale blocks and rewrite them in place. Bump on any hook change.
+  local version_sentinel='env.sh" ] && . "$HOME/.gbrain-patchkit/env.sh"'
+
+  local has_block=0 is_current=0
+  if grep -qF "$start" "$rc_file" 2>/dev/null; then
+    has_block=1
+    # Look for version sentinel inside the block (between start and end markers)
+    if awk -v s="$start" -v e="$end" -v v="$version_sentinel" '
+      $0 ~ s {inside=1; next}
+      $0 ~ e {inside=0; next}
+      inside && index($0, v) {found=1}
+      END {exit found ? 0 : 1}
+    ' "$rc_file" 2>/dev/null; then
+      is_current=1
+    fi
+  fi
+
+  if [ "$has_block" = "1" ] && [ "$is_current" = "1" ]; then
+    say "[install] shell hook already present and current in $rc_file"
     return
   fi
+
+  if [ "$has_block" = "1" ] && [ "$is_current" = "0" ]; then
+    # Old hook — strip it before writing the new one so we don't duplicate.
+    local tmp; tmp="$(mktemp)"
+    python3 - "$rc_file" "$tmp" "$start" "$end" <<'PY'
+import pathlib, sys
+src, dst, start, end = sys.argv[1:5]
+text = pathlib.Path(src).read_text()
+i = text.find(start); j = text.find(end, i+1)
+if i == -1 or j == -1:
+    pathlib.Path(dst).write_text(text); sys.exit(0)
+out = text[:i].rstrip("\n") + "\n" + text[j+len(end):].lstrip("\n")
+pathlib.Path(dst).write_text(out)
+PY
+    mv "$tmp" "$rc_file"
+    say "[install] removed stale hook block from $rc_file"
+  fi
+
   cat >> "$rc_file" <<EOF
 
-# >>> gbrain-patchkit >>>
+$start
 # Added by gbrain-patchkit. Remove this block between the markers to uninstall.
 export PATH="\$HOME/.gbrain-patchkit/bin:\$PATH"
 [ -f "\$HOME/.gbrain-patchkit/env.sh" ] && . "\$HOME/.gbrain-patchkit/env.sh"
@@ -208,9 +245,13 @@ gbrain() {
   fi
   return \$rc
 }
-# <<< gbrain-patchkit <<<
+$end
 EOF
-  say "[install] added PATH export + env source + post-upgrade hook to $rc_file"
+  if [ "$has_block" = "1" ]; then
+    say "[install] upgraded hook in $rc_file — run: source $rc_file"
+  else
+    say "[install] added hook to $rc_file — run: source $rc_file"
+  fi
 }
 
 remove_shell_hook() {
