@@ -290,10 +290,12 @@ detect_existing_auth() {
   #   DET_OPENCLAW_PRESENT (0|1) + DET_OPENCLAW_GATEWAY_PORT
   #   DET_OPENCLAW_GATEWAY_TOKEN_SET (0|1)
   #   DET_OPENCLAW_MINIMAX_MODE (oauth|apikey|"")
+  #   OC_MODELS[]       — TAB-separated rows: key<TAB>usable(yes|no|cli)<TAB>provider<TAB>baseUrl
   DET_OPENAI_SET=0; DET_OPENAI_MASKED=""
   DET_ANTHROPIC_SET=0; DET_ANTHROPIC_MASKED=""; DET_ANTHROPIC_BASE=""
   DET_OPENCLAW_PRESENT=0; DET_OPENCLAW_GATEWAY_PORT=""
   DET_OPENCLAW_GATEWAY_TOKEN_SET=0; DET_OPENCLAW_MINIMAX_MODE=""
+  OC_MODELS=()
 
   if [ -n "${OPENAI_API_KEY:-}" ]; then
     DET_OPENAI_SET=1; DET_OPENAI_MASKED="$(mask "$OPENAI_API_KEY")"
@@ -326,7 +328,95 @@ try:
 except Exception:
     pass
 " "$cfg" 2>/dev/null || true)"
+    # Extract model registry + classify by gbrain usability
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      OC_MODELS+=("$line")
+    done < <(python3 - "$cfg" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+models = d.get('agents', {}).get('defaults', {}).get('models', {})
+providers = d.get('models', {}).get('providers', {})
+for key in sorted(models.keys()):
+    prov = key.split('/', 1)[0] if '/' in key else key
+    pcfg = providers.get(prov, {})
+    api = pcfg.get('api', '') or ''
+    base = pcfg.get('baseUrl', '') or ''
+    if api == 'anthropic-messages' or prov == 'anthropic':
+        usable = 'yes'
+    elif prov == 'claude-cli':
+        usable = 'cli'
+    else:
+        usable = 'no'
+    # TAB-separated: key\tusable\tprovider\tbaseUrl
+    print(f"{key}\t{usable}\t{prov}\t{base}")
+PY
+)
   fi
+}
+
+# Pick a model from OC_MODELS (or fall back to a plain prompt).
+# Args:
+#   $1 = prompt label (e.g. "Query-expansion model")
+#   $2 = variable name to set with the chosen model
+#   $3 = "keep-prefix" or "strip-prefix" (controls whether we emit
+#        "minimax-portal/MiniMax-M2.7" vs just "MiniMax-M2.7")
+#   $4 = fallback default if no models detected
+pick_model() {
+  local label="$1" var="$2" prefix_mode="$3" fallback="$4"
+  local picked=""
+  if [ "${#OC_MODELS[@]}" -eq 0 ]; then
+    prompt "$label" "$fallback" picked
+    printf -v "$var" '%s' "$picked"
+    return
+  fi
+
+  info "  Available models (from OpenClaw config):"
+  local idx=1 default_idx=0
+  for row in "${OC_MODELS[@]}"; do
+    IFS=$'\t' read -r key usable provider base <<< "$row"
+    local tag
+    case "$usable" in
+      yes) tag="[ok] " ;;
+      cli) tag="[cli]"; ;;
+      no)  tag="[?]  " ;;
+    esac
+    info "    [$idx] $tag $key"
+    if [ "$usable" = "yes" ] && [ "$default_idx" = "0" ]; then default_idx=$idx; fi
+    idx=$((idx+1))
+  done
+  info "    [t]       type your own model name"
+  info "    legend: [ok] usable from gbrain   [cli] requires Claude CLI subscription (gbrain can't call)   [?] non-Anthropic API"
+  [ "$default_idx" = "0" ] && default_idx=1
+
+  local pick=""
+  prompt "$label (number or 't')" "$default_idx" pick
+  if [ "$pick" = "t" ] || [ "$pick" = "T" ]; then
+    prompt "  Model name" "$fallback" picked
+  else
+    local row="${OC_MODELS[$((pick-1))]:-}"
+    if [ -z "$row" ]; then
+      picked="$fallback"
+    else
+      IFS=$'\t' read -r key usable provider base <<< "$row"
+      if [ "$prefix_mode" = "strip-prefix" ] && [[ "$key" == */* ]]; then
+        picked="${key#*/}"
+      else
+        picked="$key"
+      fi
+      if [ "$usable" = "cli" ]; then
+        info "  Warning: $key requires the Claude CLI subscription backend, not HTTP."
+        info "  gbrain calls via the Anthropic SDK and will not be able to reach this model."
+      elif [ "$usable" = "no" ]; then
+        info "  Warning: $key provider is not marked anthropic-messages-compatible."
+        info "  If it fails at call time, flip back to 'paste-key' in Step 3 or pick another."
+      fi
+    fi
+  fi
+  printf -v "$var" '%s' "$picked"
 }
 
 verify_openai() {
@@ -583,12 +673,24 @@ cmd_onboard() {
 
   # --- Step 4: model names (only if we have an LLM key) ---
   if [ -n "$minimax" ]; then
-    info "Step 4/6  Model names (override gbrain's hardcoded Claude IDs)"
-    info "    expansion (replaces Haiku ): MiniMax-M2.7-highspeed  (fast, tool-use OK)"
-    info "    subagent  (replaces Sonnet): MiniMax-M2.7            (full-capability)"
-    info "    (or Claude IDs if you're pointing at real Anthropic, or any other provider's names)"
-    prompt "Query-expansion model"   "MiniMax-M2.7-highspeed" exp_model
-    prompt "Subagent default model"  "MiniMax-M2.7"           sub_model
+    info "Step 4/6  Model names"
+    # When routing through the OpenClaw gateway, the gateway expects
+    # "provider/model" (that's how it maps to the upstream provider).
+    # For direct provider endpoints (MiniMax/Anthropic), strip the prefix.
+    local prefix_mode="strip-prefix"
+    [ "$choice" = "openclaw-gateway" ] && prefix_mode="keep-prefix"
+
+    info "  Query-expansion model — replaces hardcoded Claude Haiku."
+    info "  Keep fast + tool-use-capable; this fires on every search ≥3 words."
+    pick_model "Pick for query-expansion" exp_model "$prefix_mode" "MiniMax-M2.7-highspeed"
+    info "  → exp_model = $exp_model"
+    info ""
+
+    info "  Subagent default — replaces hardcoded Claude Sonnet."
+    info "  Used by \`gbrain agent run\` when no --model flag is given."
+    info "  Pick a fuller-capability model here; speed matters less."
+    pick_model "Pick for subagent default" sub_model "$prefix_mode" "MiniMax-M2.7"
+    info "  → sub_model = $sub_model"
   else
     info "Step 4/6  (skipped — no LLM credential provided)"
   fi
