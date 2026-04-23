@@ -193,7 +193,7 @@ install_shell_hook() {
   local end="# <<< gbrain-patchkit <<<"
   # Sentinel present in the current hook version but not in older hooks — lets
   # us detect stale blocks and rewrite them in place. Bump on any hook change.
-  local version_sentinel='env.sh" ] && . "$HOME/.gbrain-patchkit/env.sh"'
+  local version_sentinel='gbrain-patchkit hook v2 (scoped env)'
 
   local has_block=0 is_current=0
   if grep -qF "$start" "$rc_file" 2>/dev/null; then
@@ -234,12 +234,19 @@ PY
   cat >> "$rc_file" <<EOF
 
 $start
+# gbrain-patchkit hook v2 (scoped env) — do not edit this line; it marks the hook version.
 # Added by gbrain-patchkit. Remove this block between the markers to uninstall.
+# Keys live in ~/.gbrain-patchkit/env.sh and are sourced ONLY inside the gbrain
+# function below — they never leak into the parent shell or sibling tools
+# (Claude Code, codex, etc.).
 export PATH="\$HOME/.gbrain-patchkit/bin:\$PATH"
-[ -f "\$HOME/.gbrain-patchkit/env.sh" ] && . "\$HOME/.gbrain-patchkit/env.sh"
 gbrain() {
-  command gbrain "\$@"
-  local rc=\$?
+  local rc
+  (
+    [ -f "\$HOME/.gbrain-patchkit/env.sh" ] && . "\$HOME/.gbrain-patchkit/env.sh"
+    exec command gbrain "\$@"
+  )
+  rc=\$?
   if [ "\${1-}" = "upgrade" ] && [ "\$rc" -eq 0 ]; then
     command gbrain-patchkit apply --quiet || true
   fi
@@ -759,8 +766,17 @@ cmd_onboard() {
   info "  Setup complete."
   info "=================================================================="
   info ""
-  info "Reload your shell to pick up env + hook:"
-  info "  source $(pick_rc_file)"
+  info "Your keys live in $ENV_FILE and are scoped to the \`gbrain\` command."
+  info "They will NOT leak into Claude Code, codex, or other Anthropic-SDK tools"
+  info "running in the same shell."
+  info ""
+  info "Reload your shell to pick up the hook (open a new terminal, or run):"
+  info "  exec \$SHELL -l"
+  info ""
+  info "If this is an upgrade from an older hook that sourced keys globally,"
+  info "already-open shells still have ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL"
+  info "in their env. Either reload those shells as above, or run:"
+  info "  unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL"
   info ""
   info "Then try:"
   info "  gbrain doctor"
