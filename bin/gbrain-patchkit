@@ -16,6 +16,7 @@
 #   onboard            interactive setup (keys, URL, models, env + hook + preload)
 #   install            non-interactive: write default config + shell hook only
 #   migrate            switch from source-patch to runtime SDK override (idempotent)
+#   upgrade            stash → git pull ~/gbrain → bun install → pop → post-upgrade
 #   doctor             verify env + preload + patch state
 #   apply [--quiet]    apply every enabled substitution (legacy source-patch path)
 #   check              show status of every substitution
@@ -712,6 +713,97 @@ cmd_update() {
   git -C "$PATCHKIT_HOME" pull --ff-only
 }
 
+# Upgrade the user's gbrain checkout end-to-end: stash → git pull → bun install →
+# stash pop → gbrain post-upgrade. The stash dance handles bun-link's cli.ts mode
+# flip transparently so the user never has to touch ~/gbrain themselves.
+cmd_upgrade() {
+  # Don't suppress stderr — if GBRAIN_SOURCE_DIR is set wrong, the user needs
+  # to see exactly why resolve_gbrain_src rejected it.
+  local src
+  if ! src="$(resolve_gbrain_src)"; then
+    err "[upgrade] could not resolve gbrain source dir; set GBRAIN_SOURCE_DIR or install gbrain"
+    exit 1
+  fi
+  if [ ! -d "$src/.git" ]; then
+    err "[upgrade] $src is not a git checkout. Use \`bun update gbrain\` for non-git installs."
+    exit 1
+  fi
+  if ! command -v git >/dev/null 2>&1; then
+    err "[upgrade] git not on PATH"; exit 1
+  fi
+
+  info "[upgrade] gbrain source: $src"
+
+  # 1. Stash any working-tree dirt (mode-flips, half-applied patches, anything).
+  local stashed=0
+  local stash_msg="gbrain-patchkit-upgrade-$(date +%s)"
+  if [ -n "$(git -C "$src" status --porcelain)" ]; then
+    info "[upgrade] working tree dirty — stashing before pull (label: $stash_msg)"
+    if git -C "$src" stash push --include-untracked --quiet -m "$stash_msg"; then
+      stashed=1
+    else
+      err "[upgrade] git stash failed; aborting"
+      exit 1
+    fi
+  else
+    info "[upgrade] working tree clean"
+  fi
+
+  # 2. Pull (ff-only — refuse to auto-merge divergent histories).
+  info "[upgrade] git pull --ff-only origin master"
+  if ! git -C "$src" pull --ff-only origin master; then
+    err "[upgrade] git pull failed."
+    if [ "$stashed" = "1" ]; then
+      err "[upgrade]   your stashed changes are at: stash@{0} ($stash_msg)"
+      err "[upgrade]   restore with: git -C $src stash pop"
+    fi
+    exit 1
+  fi
+
+  # 3. Bun install (re-flips cli.ts mode bit; pulls any new deps).
+  info "[upgrade] bun install"
+  if ! (cd "$src" && bun install); then
+    err "[upgrade] bun install failed; continuing (you may need to fix manually)"
+  fi
+
+  # 4. Pop the stash. cli.ts mode-flip stashes typically pop cleanly because
+  #    the working tree (after bun install) already matches the stashed mode.
+  #    Real conflicts mean the user had non-trivial dirt — leave it stashed.
+  if [ "$stashed" = "1" ]; then
+    info "[upgrade] restoring stash"
+    if git -C "$src" stash pop --quiet 2>/dev/null; then
+      info "[upgrade] ✓ stash restored cleanly"
+    else
+      # Pop failed (conflict) OR succeeded but reported nothing-to-do.
+      # Check if the stash is still in the list — if so, conflict.
+      if git -C "$src" stash list 2>/dev/null | grep -qF "$stash_msg"; then
+        err "[upgrade] ⚠ stash pop hit a conflict; your changes are still in:"
+        err "[upgrade]   git -C $src stash list   # search for $stash_msg"
+        err "[upgrade]   Resolve manually with: git -C $src stash pop"
+      else
+        info "[upgrade] ✓ stash absorbed (no-op pop — bun install already restored the state)"
+      fi
+    fi
+  fi
+
+  # 5. Run gbrain post-upgrade so migrations + features refresh land.
+  info "[upgrade] gbrain post-upgrade"
+  if command -v gbrain >/dev/null 2>&1; then
+    # Source env.sh so post-upgrade has the user's keys + GBRAIN_SOURCE_DIR.
+    if [ -f "$ENV_FILE" ]; then
+      # shellcheck disable=SC1090
+      ( . "$ENV_FILE" && gbrain post-upgrade ) || info "[upgrade] gbrain post-upgrade returned non-zero (non-fatal)"
+    else
+      gbrain post-upgrade || info "[upgrade] gbrain post-upgrade returned non-zero (non-fatal)"
+    fi
+  else
+    info "[upgrade] gbrain not on PATH; skipping post-upgrade"
+  fi
+
+  info ""
+  info "[upgrade] ✓ done. cd $src && git status   # should be clean (modulo cli.ts mode if you declined the migrate fix)"
+}
+
 cmd_install() {
   ensure_config
   install_shell_hook
@@ -1115,6 +1207,7 @@ main() {
     onboard)   cmd_onboard ;;
     install)   cmd_install ;;
     migrate)   cmd_migrate ;;
+    upgrade)   cmd_upgrade ;;
     apply)     cmd_apply ;;
     check)     cmd_check ;;
     revert)    cmd_revert ;;

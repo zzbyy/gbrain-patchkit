@@ -78,6 +78,7 @@ The pre-runtime-override mechanism — find/replace edits committed to `~/gbrain
 ```
 gbrain-patchkit onboard        interactive setup (keys, URL, models, env + hook + smoke test)
 gbrain-patchkit migrate        switch existing source-patch installs to runtime override (idempotent)
+gbrain-patchkit upgrade        stash → git pull ~/gbrain → bun install → pop → post-upgrade
 gbrain-patchkit doctor         verify env + preload + SDK shape + patch state
 gbrain-patchkit env            open env.sh in $EDITOR
 gbrain-patchkit edit           open substitutions.json in $EDITOR (custom source patches)
@@ -171,9 +172,15 @@ The ideal long-term fix is making gbrain itself read `GBRAIN_EXPANSION_MODEL` an
 
 ## Known wart (upstream): cli.ts mode flip
 
-Bun re-chmods `~/gbrain/src/cli.ts` from 644 → 755 on every `bun link`/`bun install` (it auto-marks files with shebangs executable). Even though patchkit no longer touches that file, the mode flip alone leaves the gbrain tree dirty enough to abort `git pull`.
+Bun re-chmods `~/gbrain/src/cli.ts` from 644 → 755 on every `bun link`/`bun install` (it auto-marks files with shebangs executable). The runtime override doesn't care — Bun reads `cli.ts` via `fs`, not `exec`, so gbrain still runs even when the mode bit is "wrong." But the mode flip alone leaves the gbrain tree dirty enough to abort `git pull`.
 
-`gbrain-patchkit migrate` offers a one-time fix during onboarding: `git -C ~/gbrain update-index --chmod=+x src/cli.ts`. After that, future bun installs find the index already aligned and stop reporting it as modified. Decline the prompt if you'd rather keep `~/gbrain` untouched and stash the mode bit yourself before each pull.
+Three ways to handle it:
+
+1. **`gbrain-patchkit upgrade`** (recommended) — runs the full ritual: stash any dirt, `git pull`, `bun install`, pop the stash, run `gbrain post-upgrade`. You never touch `~/gbrain` yourself. Use this in place of the manual `cd ~/gbrain && git pull && bun install && gbrain post-upgrade` sequence.
+
+2. **One-time index fix** — `gbrain-patchkit migrate` offers it: `git -C ~/gbrain update-index --chmod=+x src/cli.ts`. After that, future bun installs find the index already aligned and stop reporting it as modified. This is the only place patchkit touches `~/gbrain`, and only with consent.
+
+3. **Manual stash dance** — `cd ~/gbrain && git stash && git pull && git stash pop` every time you want to upgrade. Identical to (1) but you run it yourself.
 
 ## License
 
