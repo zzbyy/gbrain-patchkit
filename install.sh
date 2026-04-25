@@ -52,6 +52,25 @@ if [ ! -f "$HOME_DIR/substitutions.json" ] && [ -f "$HOME_DIR/substitutions.defa
   say "[install] seeded substitutions.json from default"
 fi
 
+# Sanity check: anthropic-override.js must be present after clone/pull. The
+# Bun preload referenced from env.sh points at this file; without it the
+# runtime override silently no-ops.
+if [ ! -f "$HOME_DIR/anthropic-override.js" ]; then
+  err "[install] WARNING: $HOME_DIR/anthropic-override.js missing after clone/pull."
+  err "[install]   Runtime override will not engage. Re-run the installer or"
+  err "[install]   git -C $HOME_DIR pull to refresh."
+fi
+
+# Existing-install path: if env.sh is already there but doesn't yet export
+# GBRAIN_ENTRY (the runtime-override marker), run migrate to wire it in
+# (idempotent + revert any active source patches). Fresh installs go through
+# onboard.
+if [ -f "$HOME_DIR/env.sh" ] && ! grep -qE '^[[:space:]]*export[[:space:]]+GBRAIN_ENTRY=' "$HOME_DIR/env.sh" 2>/dev/null; then
+  say ""
+  say "[install] existing install detected without runtime-override config — running migrate"
+  exec "$HOME_DIR/bin/gbrain-patchkit" migrate
+fi
+
 # Hand off to the onboard wizard (interactive)
 say ""
 exec "$HOME_DIR/bin/gbrain-patchkit" onboard

@@ -13,12 +13,13 @@
 #   ~/.gbrain-patchkit/apply.log               (append-only audit log)
 #
 # Commands:
-#   onboard            interactive setup (keys, URL, models, patch, verify)
+#   onboard            interactive setup (keys, URL, models, env + hook + preload)
 #   install            non-interactive: write default config + shell hook only
-#   apply [--quiet]    apply every enabled substitution (idempotent)
+#   migrate            switch from source-patch to runtime SDK override (idempotent)
+#   doctor             verify env + preload + patch state
+#   apply [--quiet]    apply every enabled substitution (legacy source-patch path)
 #   check              show status of every substitution
 #   revert             undo every substitution
-#   doctor             verify env + patch state
 #   edit               open substitutions.json in $EDITOR
 #   env                open env.sh in $EDITOR
 #   locate             print the resolved gbrain source directory
@@ -195,10 +196,14 @@ install_shell_hook() {
   # us detect stale blocks and rewrite them in place. Bump on any hook change.
   local version_sentinel='gbrain-patchkit hook v2 (scoped env)'
 
+  # v3 sentinel — bumped when the wrapper switched from `command gbrain` to
+  # `bun --preload` (BUN_PRELOAD env var is not respected by Bun 1.3.x; the
+  # CLI flag is the only reliable preload mechanism).
+  version_sentinel='gbrain-patchkit hook v3 (runtime override)'
+
   local has_block=0 is_current=0
   if grep -qF "$start" "$rc_file" 2>/dev/null; then
     has_block=1
-    # Look for version sentinel inside the block (between start and end markers)
     if awk -v s="$start" -v e="$end" -v v="$version_sentinel" '
       $0 ~ s {inside=1; next}
       $0 ~ e {inside=0; next}
@@ -234,22 +239,31 @@ PY
   cat >> "$rc_file" <<EOF
 
 $start
-# gbrain-patchkit hook v2 (scoped env) — do not edit this line; it marks the hook version.
+# gbrain-patchkit hook v3 (runtime override) — do not edit this line; it marks the hook version.
 # Added by gbrain-patchkit. Remove this block between the markers to uninstall.
-# Keys live in ~/.gbrain-patchkit/env.sh and are sourced ONLY inside the gbrain
-# function below — they never leak into the parent shell or sibling tools
-# (Claude Code, codex, etc.).
+# Keys + GBRAIN_ENTRY/GBRAIN_OVERRIDE_JS live in ~/.gbrain-patchkit/env.sh and
+# are sourced ONLY inside the gbrain function below — they never leak into the
+# parent shell or sibling tools (Claude Code, codex, etc.).
+#
+# The wrapper invokes \`bun --preload <override.js> <cli.ts>\` directly. Bun's
+# BUN_PRELOAD env var is not respected (1.3.x); the --preload flag is the only
+# reliable hook point. Falling back to \`command gbrain\` if env vars are missing
+# (which means the SDK runs unwrapped — fix with: gbrain-patchkit migrate).
 export PATH="\$HOME/.gbrain-patchkit/bin:\$PATH"
 gbrain() {
   local rc
   (
     [ -f "\$HOME/.gbrain-patchkit/env.sh" ] && . "\$HOME/.gbrain-patchkit/env.sh"
+    if [ -n "\${GBRAIN_ENTRY:-}" ] && [ -f "\$GBRAIN_ENTRY" ] \\
+       && [ -n "\${GBRAIN_OVERRIDE_JS:-}" ] && [ -f "\$GBRAIN_OVERRIDE_JS" ] \\
+       && command -v bun >/dev/null 2>&1; then
+      exec bun --preload "\$GBRAIN_OVERRIDE_JS" "\$GBRAIN_ENTRY" "\$@"
+    fi
+    # Fallback: native gbrain bin without preload. Override won't engage; run
+    # \`gbrain-patchkit migrate\` to set GBRAIN_ENTRY/GBRAIN_OVERRIDE_JS.
     exec command gbrain "\$@"
   )
   rc=\$?
-  if [ "\${1-}" = "upgrade" ] && [ "\$rc" -eq 0 ]; then
-    command gbrain-patchkit apply --quiet || true
-  fi
   return \$rc
 }
 $end
@@ -313,9 +327,56 @@ prompt_secret() {
   printf -v "$var" '%s' "$ans"
 }
 
+PRELOAD_FILE="$PATCHKIT_HOME/anthropic-override.js"
+
+# Resolve gbrain's actual entry script (real path, following symlinks).
+# bun-link installs ~/.bun/bin/gbrain as a symlink chain that ends at the
+# user's gbrain checkout's src/cli.ts. The runtime-override wrapper invokes
+# bun --preload directly against this entry, bypassing the bun-link bin.
+resolve_gbrain_entry() {
+  if ! command -v gbrain >/dev/null 2>&1; then return 1; fi
+  local bin real
+  bin="$(command -v gbrain)"
+  real="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$bin" 2>/dev/null || true)"
+  [ -n "$real" ] && [ -f "$real" ] || return 1
+  printf '%s\n' "$real"
+}
+
+# Build the runtime-override export block for env.sh. Three vars:
+#   GBRAIN_SOURCE_DIR — anchor for the preload's createRequire (the preload
+#                       lives in ~/.gbrain-patchkit/ which has no node_modules)
+#   GBRAIN_ENTRY      — absolute path to gbrain's cli.ts; the shell-function
+#                       wrapper invokes `bun --preload <override> $GBRAIN_ENTRY`
+#                       so Bun honors the preload (its BUN_PRELOAD env var is
+#                       not respected; --preload flag is the only path that
+#                       works on every invocation in Bun 1.3.x)
+#   GBRAIN_OVERRIDE_JS — absolute path to the preload module (used by the
+#                       wrapper's --preload argument).
+emit_preload_block() {
+  local src="$1"     # absolute path to gbrain source dir, may be empty
+  local entry="$2"   # absolute path to gbrain's cli.ts entry, may be empty
+  printf '\n# Anthropic SDK runtime override (replaces source-patch mechanism).\n'
+  printf '# Loaded via `bun --preload` in the gbrain shell-function wrapper;\n'
+  printf '# intercepts Messages.create to swap models. ~/gbrain stays untouched.\n'
+  if [ -n "$src" ]; then
+    printf 'export GBRAIN_SOURCE_DIR=%q\n' "$src"
+  else
+    printf '# export GBRAIN_SOURCE_DIR=/path/to/gbrain   # (auto-detect failed; set manually)\n'
+  fi
+  if [ -n "$entry" ]; then
+    printf 'export GBRAIN_ENTRY=%q\n' "$entry"
+  else
+    printf '# export GBRAIN_ENTRY=/path/to/gbrain/src/cli.ts   # (auto-detect failed; set manually)\n'
+  fi
+  printf 'export GBRAIN_OVERRIDE_JS=%q\n' "$PRELOAD_FILE"
+}
+
 write_env_file() {
   # Args passed as VAR=VAL pairs, one per line in the env file.
   local openai="$1" minimax="$2" minimax_base="$3" exp_model="$4" sub_model="$5"
+  local src="" entry=""
+  src="$(resolve_gbrain_src 2>/dev/null || true)"
+  entry="$(resolve_gbrain_entry 2>/dev/null || true)"
   umask 077
   cat > "$ENV_FILE" <<EOF
 # ~/.gbrain-patchkit/env.sh — generated by gbrain-patchkit onboard
@@ -328,7 +389,143 @@ EOF
   [ -n "$minimax_base" ] && printf 'export ANTHROPIC_BASE_URL=%q\n'       "$minimax_base" >> "$ENV_FILE"
   [ -n "$exp_model" ]    && printf 'export GBRAIN_EXPANSION_MODEL=%q\n'   "$exp_model"    >> "$ENV_FILE"
   [ -n "$sub_model" ]    && printf 'export GBRAIN_SUBAGENT_MODEL=%q\n'    "$sub_model"    >> "$ENV_FILE"
+  emit_preload_block "$src" "$entry" >> "$ENV_FILE"
   chmod 600 "$ENV_FILE"
+}
+
+# Append GBRAIN_SOURCE_DIR + GBRAIN_ENTRY + GBRAIN_OVERRIDE_JS exports to an
+# existing env.sh if they aren't there yet. Used by `migrate` so existing
+# installs gain the runtime override without losing their hand-edited keys.
+ensure_preload_export() {
+  local src="$1"
+  local entry=""
+  entry="$(resolve_gbrain_entry 2>/dev/null || true)"
+
+  if [ ! -f "$ENV_FILE" ]; then
+    umask 077
+    cat > "$ENV_FILE" <<EOF
+# ~/.gbrain-patchkit/env.sh — created by gbrain-patchkit migrate
+# Sourced from your shell rc via the patchkit install block.
+
+EOF
+    chmod 600 "$ENV_FILE"
+  fi
+
+  local has_source_dir=0 has_entry=0 has_override=0
+  grep -qE '^[[:space:]]*export[[:space:]]+GBRAIN_SOURCE_DIR='  "$ENV_FILE" 2>/dev/null && has_source_dir=1
+  grep -qE '^[[:space:]]*export[[:space:]]+GBRAIN_ENTRY='       "$ENV_FILE" 2>/dev/null && has_entry=1
+  grep -qE '^[[:space:]]*export[[:space:]]+GBRAIN_OVERRIDE_JS=' "$ENV_FILE" 2>/dev/null && has_override=1
+
+  if [ "$has_source_dir" = "1" ] && [ "$has_entry" = "1" ] && [ "$has_override" = "1" ]; then
+    say "[migrate] runtime-override exports already configured in $ENV_FILE"
+    return
+  fi
+
+  {
+    printf '\n# --- runtime override (added by gbrain-patchkit migrate) ---\n'
+    [ "$has_source_dir" = "0" ] && [ -n "$src" ]   && printf 'export GBRAIN_SOURCE_DIR=%q\n' "$src"
+    [ "$has_entry"      = "0" ] && [ -n "$entry" ] && printf 'export GBRAIN_ENTRY=%q\n'      "$entry"
+    [ "$has_override"   = "0" ]                    && printf 'export GBRAIN_OVERRIDE_JS=%q\n' "$PRELOAD_FILE"
+    # Cleanup: older patchkit versions wrote a no-op BUN_PRELOAD line. Leave any
+    # existing one alone — it's harmless — but don't re-add it.
+  } >> "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+  say "[migrate] appended runtime-override exports to $ENV_FILE"
+}
+
+# End-to-end smoke test: invoke `bun --preload <override>` against a
+# tiny script that requires the gbrain SDK and inspects whether
+# Messages.prototype.create has been wrapped by our preload. This catches
+# both SDK-shape drift AND any future change in how Bun loads --preload.
+# Returns 0 on success.
+smoke_test_preload() {
+  local src="$1"
+  [ -z "$src" ] && return 0
+  if ! command -v bun >/dev/null 2>&1; then
+    say "[migrate] bun not on PATH; skipping smoke test"
+    return 0
+  fi
+  if [ ! -f "$PRELOAD_FILE" ]; then
+    err "[migrate] preload file missing: $PRELOAD_FILE"
+    return 1
+  fi
+  local out
+  out="$(GBRAIN_SOURCE_DIR="$src" \
+         GBRAIN_EXPANSION_MODEL=__patchkit_smoke__ \
+         bun --preload "$PRELOAD_FILE" -e '
+    const path = require("path");
+    const Module = require("module");
+    const r = Module.createRequire(path.join(process.env.GBRAIN_SOURCE_DIR, "package.json"));
+    const M = r("@anthropic-ai/sdk/resources/messages.js").Messages;
+    // Replace inner orig with a body-recording stub so we can observe what swap() returned.
+    // The wrapper installed by the preload calls orig.call(this, swap(body)).
+    // We probe by reading the wrapped function source: a wrapped function contains "swap".
+    const wrapped = M.prototype.create.toString().includes("swap(body)");
+    console.log(wrapped ? "wrapped" : "unwrapped");
+  ' 2>&1)"
+  case "$out" in
+    wrapped)
+      say "[migrate] ✓ runtime override engages under \`bun --preload\`"
+      return 0 ;;
+    unwrapped)
+      err "[migrate] ✗ preload ran but did NOT wrap Messages.create"
+      err "          The SDK shape may have drifted. Inspect: $PRELOAD_FILE"
+      return 1 ;;
+    *)
+      err "[migrate] ✗ smoke test returned unexpected output:"
+      err "$out"
+      return 1 ;;
+  esac
+}
+
+# Detect the bun-link cli.ts mode-flip and offer to fix it once via
+# git update-index. Strictly opt-in (default Y but plainly explained).
+# This is the one place patchkit will touch ~/gbrain — only with consent.
+offer_clits_fix() {
+  local src="$1"
+  [ -z "$src" ] && return 0
+  [ ! -f "$src/src/cli.ts" ] && return 0
+  if ! command -v git >/dev/null 2>&1 || [ ! -d "$src/.git" ]; then return 0; fi
+
+  local porcelain
+  porcelain="$(git -C "$src" status --porcelain src/cli.ts 2>/dev/null || true)"
+  [ -z "$porcelain" ] && return 0
+
+  # Only offer if the diff is mode-only (no content change). `git diff
+  # --summary` prints a "mode change" line for mode-only edits.
+  local summary
+  summary="$(git -C "$src" diff --summary -- src/cli.ts 2>/dev/null || true)"
+  case "$summary" in
+    *"mode change"*) ;;
+    *) return 0 ;;
+  esac
+
+  info ""
+  info "[migrate] ~/gbrain/src/cli.ts has a mode-only diff (100644 → 100755)."
+  info "          This is Bun re-chmod'ing shebang files on every \`bun link\` —"
+  info "          not patchkit. It's the remaining reason \`git pull\` aborts."
+  info ""
+  info "          One-time fix: mark cli.ts executable in the gbrain index"
+  info "          (\`git -C $src update-index --chmod=+x src/cli.ts\`)."
+  info "          This DOES touch ~/gbrain. Decline if you want to keep the"
+  info "          tree pristine and stash/reset cli.ts manually before pulls."
+  info ""
+  local ans=""
+  prompt "Apply the cli.ts mode fix now? [y/N]" "N" ans
+  case "$ans" in
+    y|Y|yes|Yes|YES)
+      if git -C "$src" update-index --chmod=+x src/cli.ts 2>/dev/null; then
+        info "[migrate] ✓ marked src/cli.ts executable in the gbrain index"
+        info "[migrate]   git -C $src status now shows it staged; commit it from"
+        info "[migrate]   your gbrain checkout, or revert with: git -C $src restore --staged src/cli.ts"
+      else
+        err  "[migrate] ✗ git update-index failed; skipping"
+      fi
+      ;;
+    *)
+      info "[migrate] skipped cli.ts fix (you can re-run \`gbrain-patchkit migrate\` any time)"
+      ;;
+  esac
 }
 
 detect_existing_auth() {
@@ -538,12 +735,13 @@ cmd_doctor() {
   info "[doctor] tool home:       $PATCHKIT_HOME"
   info "[doctor] config:          $([ -f "$CONFIG" ] && echo present || echo MISSING)"
   info "[doctor] env file:        $([ -f "$ENV_FILE" ] && echo present || echo MISSING)"
+  info "[doctor] preload file:    $([ -f "$PRELOAD_FILE" ] && echo present || echo MISSING)"
   # Source env file locally for the probe if it exists
   if [ -f "$ENV_FILE" ]; then
     # shellcheck disable=SC1090
     . "$ENV_FILE"
   fi
-  local vars=(OPENAI_API_KEY ANTHROPIC_API_KEY ANTHROPIC_BASE_URL GBRAIN_EXPANSION_MODEL GBRAIN_SUBAGENT_MODEL)
+  local vars=(OPENAI_API_KEY ANTHROPIC_API_KEY ANTHROPIC_BASE_URL GBRAIN_EXPANSION_MODEL GBRAIN_SUBAGENT_MODEL GBRAIN_SOURCE_DIR GBRAIN_ENTRY GBRAIN_OVERRIDE_JS)
   for v in "${vars[@]}"; do
     local val="${!v-}"
     if [ -z "$val" ]; then
@@ -561,8 +759,113 @@ cmd_doctor() {
     info "[doctor] gbrain on PATH:  (not found)"
   fi
   info ""
-  info "[doctor] patch status:"
+
+  # Runtime-override smoke test — replaces the old marker-based drift check
+  # for the default model substitutions.
+  info "[doctor] runtime override:"
+  local src=""
+  if src="$(resolve_gbrain_src 2>/dev/null)"; then
+    if smoke_test_preload "$src"; then
+      info "  ✓ SDK present, Messages.prototype.create resolved"
+    fi
+  else
+    info "  (gbrain source not located — can't probe SDK shape)"
+  fi
+  info ""
+
+  info "[doctor] source-patch substitutions (legacy mechanism — disabled by default):"
   cmd_check || true
+}
+
+cmd_migrate() {
+  ensure_config
+  info ""
+  info "=================================================================="
+  info "  gbrain-patchkit migrate — switch to runtime SDK override"
+  info "=================================================================="
+  info ""
+  info "  Retires source-patch mechanism for the default model substitutions."
+  info "  Reverts any active patches in ~/gbrain, disables the defaults in"
+  info "  substitutions.json, and wires BUN_PRELOAD into env.sh so the"
+  info "  Anthropic SDK is patched in-process at every gbrain call."
+  info ""
+
+  local src=""
+  if src="$(resolve_gbrain_src 2>/dev/null)"; then
+    info "[migrate] gbrain source: $src"
+  else
+    info "[migrate] gbrain source not located (set GBRAIN_SOURCE_DIR to override)"
+    info "[migrate]   skipping source-patch revert; env + preload setup will still run"
+  fi
+  info ""
+
+  # 1. Revert any active source patches. Idempotent: unpatched files are skipped.
+  if [ -n "$src" ]; then
+    info "[migrate] reverting any active source patches"
+    run_engine revert "$src" "$CONFIG" "$LOG" "0" || true
+    info ""
+  fi
+
+  # 2. Disable the two default substitutions in user's config (preserves
+  #    any custom substitutions the user added).
+  python3 - "$CONFIG" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+try:
+    cfg = json.loads(p.read_text())
+except Exception as e:
+    print(f"[migrate] could not parse {p}: {e}", file=sys.stderr); sys.exit(0)
+DEFAULT_MARKERS = {"GBRAIN_EXPANSION_MODEL", "GBRAIN_SUBAGENT_MODEL"}
+changed = False
+for s in cfg.get("substitutions", []):
+    if s.get("marker") in DEFAULT_MARKERS and s.get("enabled", True):
+        s["enabled"] = False
+        s["disabled_by"] = "runtime-override"
+        changed = True
+if changed:
+    p.write_text(json.dumps(cfg, indent=2) + "\n")
+    print(f"[migrate] disabled default source substitutions in {p}")
+else:
+    print(f"[migrate] default substitutions already disabled in {p}")
+PY
+  info ""
+
+  # 3. Make sure the preload file is present in the install dir.
+  if [ ! -f "$PRELOAD_FILE" ]; then
+    err "[migrate] preload file missing: $PRELOAD_FILE"
+    err "[migrate]   run \`gbrain-patchkit update\` to pull it in, then re-run migrate"
+    exit 1
+  fi
+
+  # 4. Append BUN_PRELOAD + GBRAIN_SOURCE_DIR exports to env.sh (idempotent).
+  ensure_preload_export "$src"
+  info ""
+
+  # 5. Refresh shell hook (idempotent — bumps if version sentinel drifted).
+  install_shell_hook
+  info ""
+
+  # 6. SDK shape smoke test.
+  if [ -n "$src" ]; then
+    smoke_test_preload "$src" || true
+    info ""
+  fi
+
+  # 7. Optional cli.ts mode-flip fix (consent prompt, default N).
+  offer_clits_fix "$src"
+
+  info ""
+  info "=================================================================="
+  info "  Migration complete."
+  info "=================================================================="
+  info ""
+  info "  Open a new shell or run:  exec \$SHELL -l"
+  info "  Then verify:              gbrain-patchkit doctor"
+  info ""
+  info "  Your next \`cd ~/gbrain && git pull origin master && bun install\`"
+  info "  should run without conflict (modulo the cli.ts mode bit if you"
+  info "  declined the fix above)."
+  info ""
 }
 
 cmd_onboard() {
@@ -580,9 +883,13 @@ cmd_onboard() {
   info "  1. Locate your gbrain install"
   info "  2. Collect API keys (OpenAI for embeddings; MiniMax/etc for LLM)"
   info "  3. Collect an Anthropic-compatible base URL + model names"
-  info "  4. Write env file + shell hook"
-  info "  5. Apply the model-override patches to gbrain source"
+  info "  4. Write env file (with BUN_PRELOAD pointing at the runtime override)"
+  info "  5. Install the shell hook + verify the SDK shape"
   info "  6. Verify everything"
+  info ""
+  info "  NOTE: gbrain-patchkit no longer modifies ~/gbrain source files for"
+  info "  the model substitutions. anthropic-override.js (a Bun preload) does"
+  info "  the swap at SDK call time, so \`git pull\` in ~/gbrain just works."
   info ""
   info "All keys are stored in $ENV_FILE with 600 perms. Nothing leaves your machine."
   info ""
@@ -744,16 +1051,17 @@ cmd_onboard() {
   fi
   info ""
 
-  # --- Step 5: write files + install hook ---
-  info "Step 5/6  Write env + install shell hook + apply patches"
+  # --- Step 5: write files + install hook + smoke-test the runtime override ---
+  info "Step 5/6  Write env + install shell hook + verify runtime override"
   write_env_file "$openai" "$minimax" "$minimax_base" "$exp_model" "$sub_model"
-  info "  ✓ wrote $ENV_FILE"
+  info "  ✓ wrote $ENV_FILE (includes BUN_PRELOAD for runtime override)"
   install_shell_hook
   ensure_config
-  # Source env so apply runs with user's settings available for any future hooks
   # shellcheck disable=SC1090
   . "$ENV_FILE"
-  run_engine apply "$src" "$CONFIG" "$LOG" "0" || true
+  # Verify the Anthropic SDK is at the path our preload hooks. No source
+  # patches are applied — the preload does the swap at call time.
+  smoke_test_preload "$src" || true
   info ""
 
   # --- Step 6: verify ---
@@ -783,11 +1091,12 @@ cmd_onboard() {
   info "  gbrain search \"your query at least three words\""
   info ""
   info "Other useful commands:"
-  info "  gbrain-patchkit doctor       verify env + patch state"
-  info "  gbrain-patchkit check        show patch status"
+  info "  gbrain-patchkit doctor       verify env + preload + patch state"
+  info "  gbrain-patchkit migrate      switch existing source-patch installs to runtime override"
   info "  gbrain-patchkit env          edit your keys / models"
-  info "  gbrain-patchkit edit         edit substitutions.json"
-  info "  gbrain-patchkit revert       undo patches"
+  info "  gbrain-patchkit edit         edit substitutions.json (custom source patches)"
+  info "  gbrain-patchkit check        show source-patch status (legacy)"
+  info "  gbrain-patchkit revert       undo source patches (legacy)"
   info "  gbrain-patchkit uninstall    remove shell hook"
   info ""
 }
@@ -805,6 +1114,7 @@ main() {
   case "$cmd" in
     onboard)   cmd_onboard ;;
     install)   cmd_install ;;
+    migrate)   cmd_migrate ;;
     apply)     cmd_apply ;;
     check)     cmd_check ;;
     revert)    cmd_revert ;;

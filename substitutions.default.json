@@ -1,17 +1,19 @@
 {
-  "description": "Default gbrain source substitutions. Each entry turns a hardcoded model ID into an env-driven override so you can point gbrain at any Anthropic-compatible endpoint (MiniMax, self-hosted litellm, etc.). The `marker` must appear in `replace` but NOT in `find` — that's how the tool detects already-patched state so it's safe to re-run after every `gbrain upgrade`. Set `enabled: false` on any entry to keep the definition but stop applying it.",
+  "description": "Source-patch defaults — DISABLED. As of the runtime-override redesign, gbrain-patchkit no longer modifies ~/gbrain source files for the Haiku/Sonnet model IDs. Instead, anthropic-override.js (loaded via BUN_PRELOAD from env.sh) intercepts Messages.create at SDK call time and swaps models based on GBRAIN_EXPANSION_MODEL / GBRAIN_SUBAGENT_MODEL. These entries are kept here so existing installs can `gbrain-patchkit revert` cleanly, and so anyone who really wants source-edit behavior can flip `enabled: true`. New users should leave them as-is. Add your own entries below if you need to patch other gbrain source for reasons the runtime override can't address.",
   "substitutions": [
     {
-      "name": "env-driven expansion model",
-      "enabled": true,
+      "name": "env-driven expansion model (legacy source patch — superseded by anthropic-override.js)",
+      "enabled": false,
+      "disabled_by": "runtime-override",
       "file": "src/core/search/expansion.ts",
       "marker": "GBRAIN_EXPANSION_MODEL",
       "find": "model: 'claude-haiku-4-5-20251001',",
       "replace": "model: process.env.GBRAIN_EXPANSION_MODEL ?? 'claude-haiku-4-5-20251001',"
     },
     {
-      "name": "env-driven subagent default model",
-      "enabled": true,
+      "name": "env-driven subagent default model (legacy source patch — superseded by anthropic-override.js)",
+      "enabled": false,
+      "disabled_by": "runtime-override",
       "file": "src/core/minions/handlers/subagent.ts",
       "marker": "GBRAIN_SUBAGENT_MODEL",
       "find": "const DEFAULT_MODEL = 'claude-sonnet-4-6';",
