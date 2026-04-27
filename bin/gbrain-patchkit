@@ -761,8 +761,13 @@ cmd_upgrade() {
   fi
 
   # 3. Bun install (re-flips cli.ts mode bit; pulls any new deps).
-  info "[upgrade] bun install"
-  if ! (cd "$src" && bun install); then
+  #    --ignore-scripts: gbrain's postinstall runs `gbrain apply-migrations`,
+  #    but Bun 1.3's lifecycle-script sandbox blocks executing binaries
+  #    outside the project tree (~/.bun/bin/gbrain → "Permission denied").
+  #    We invoke `gbrain post-upgrade` explicitly in step 5 below, which
+  #    runs apply-migrations itself — so the postinstall is redundant.
+  info "[upgrade] bun install --ignore-scripts"
+  if ! (cd "$src" && bun install --ignore-scripts); then
     err "[upgrade] bun install failed; continuing (you may need to fix manually)"
   fi
 
