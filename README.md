@@ -38,7 +38,12 @@ All four land in `~/.gbrain-patchkit/env.sh` with `600` perms. Nothing is sent a
 
 ## How the runtime override works
 
-The installer adds a wrapper function around `gbrain` in your shell rc:
+The installer adds two wrappers around `gbrain`:
+
+1. a shell function in your shell rc for interactive shells, and
+2. a `~/.local/bin/gbrain` command shim for non-interactive callers that do not source shell rc files, such as agents, cron jobs, launchd tasks, and scripts.
+
+The interactive shell wrapper looks like this:
 
 ```bash
 gbrain() {
@@ -61,9 +66,11 @@ gbrain() {
 
 (The wrapper bypasses the `bun link` shim and calls Bun directly because Bun has no env-var equivalent for `--preload` — `BUN_PRELOAD` is not a thing in Bun 1.3.x. The CLI flag is the only reliable hook point.)
 
-The keys + model choices live in `env.sh`, scoped to a subshell so they don't leak into Claude Code, codex, or other Anthropic-SDK tools running in the same parent shell.
+The non-interactive command shim performs the same flow from an executable: it sources `~/.gbrain-patchkit/env.sh` in its own process, invokes `bun --preload <override> <cli.ts>` when runtime override metadata is present, and otherwise falls back to the native `gbrain` binary. This fixes callers that see `/Users/zz/.bun/bin/gbrain` directly because they never loaded `.zshrc`/`.bashrc`.
 
-`~/gbrain` is never modified. `cd ~/gbrain && git pull origin master && bun install` runs without conflict. There's no "reapply after upgrade" step — the override engages on every `gbrain` invocation regardless of upstream version.
+The keys + model choices live in `env.sh`, scoped to the wrapper process so they don't leak into Claude Code, codex, or other Anthropic-SDK tools running in the same parent shell.
+
+`~/gbrain` is never modified. `cd ~/gbrain && git pull origin master && bun install` runs without conflict. There's no "reapply after upgrade" step — the override engages on every `gbrain` invocation that goes through either wrapper regardless of upstream version.
 
 ### Drift detection
 
@@ -109,6 +116,7 @@ After this, `cd ~/gbrain && git pull origin master && bun install` runs without 
 ```
 ~/.gbrain-patchkit/
 ├── bin/gbrain-patchkit          (tool, shipped in this repo)
+├── bin/gbrain                   (non-interactive command shim, symlinked to ~/.local/bin/gbrain)
 ├── anthropic-override.js        (Bun preload — runtime SDK override, shipped in this repo)
 ├── install.sh                   (installer, shipped in this repo)
 ├── README.md                    (this file)
