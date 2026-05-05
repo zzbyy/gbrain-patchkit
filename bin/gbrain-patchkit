@@ -68,6 +68,12 @@ resolve_gbrain_src() {
   fi
   local bin real pkg_dir
   bin="$(command -v gbrain)"
+  # command -v may return a bare name (no /) when gbrain is a shell function.
+  # realpath("gbrain") resolves relative to cwd, not PATH — use whence -p
+  # (zsh) or which to get the actual path in that case.
+  if [[ "$bin" != */* ]]; then
+    bin="$(whence -p gbrain 2>/dev/null || command -v gbrain)"
+  fi
   real="$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$bin")"
   pkg_dir="$(dirname "$real")"
   while [ "$pkg_dir" != "/" ] && [ ! -f "$pkg_dir/package.json" ]; do
