@@ -68,13 +68,35 @@ resolve_gbrain_src() {
   fi
   local bin real pkg_dir
   bin="$(command -v gbrain)"
-  # command -v may return a bare name (no /) when gbrain is a shell function.
-  # realpath("gbrain") resolves relative to cwd, not PATH — use whence -p
-  # (zsh) or which to get the actual path in that case.
+  # realpath of a bare name resolves relative to cwd — this happens when gbrain
+  # is a shell function. Fall back to whence -p (zsh) which gives the actual path
+  # of the external command regardless of cwd.
   if [[ "$bin" != */* ]]; then
     bin="$(whence -p gbrain 2>/dev/null || command -v gbrain)"
   fi
   real="$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$bin")"
+  # After realpath, bin may still be the shim (e.g. /Users/zz/.gbrain-patchkit/bin/gbrain)
+  # if whence-p found the shim first on PATH. Walk PATH again to find the bun shim.
+  # If real resolves to the patchkit dir itself, search PATH for ~/.bun/bin/gbrain.
+  if [[ "$real" == "$PATCHKIT_HOME/"* || "$real" == "$HOME/.gbrain-patchkit/"* ]]; then
+    local dir candidate
+    local IFS=':' arr
+    read -ra arr <<< "$PATH"
+    for dir in "${arr[@]}"; do
+      [ -n "$dir" ] || continue
+      candidate="$dir/gbrain"
+      [ -f "$candidate" ] || continue
+      # Skip patchkit dir entries.
+      [[ "$candidate" == "$PATCHKIT_HOME/"* || "$candidate" == "$HOME/.gbrain-patchkit/"* ]] && continue
+      if [ -L "$candidate" ]; then
+        local target; target="$(readlink "$candidate" 2>/dev/null || true)"
+        [[ "$target" == *"cli.ts"* ]] && real="$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$candidate")" && break
+      fi
+      [ -x "$candidate" ] || continue
+      real="$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$candidate")"
+      break
+    done
+  fi
   pkg_dir="$(dirname "$real")"
   while [ "$pkg_dir" != "/" ] && [ ! -f "$pkg_dir/package.json" ]; do
     pkg_dir="$(dirname "$pkg_dir")"
