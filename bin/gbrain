@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# gbrain-patchkit command shim.
+#
+# This executable covers non-interactive callers that do not source ~/.zshrc or
+# ~/.bashrc, e.g. agents, cron jobs, launchd tasks, and scripts. It mirrors the
+# interactive shell function installed by gbrain-patchkit: source env.sh in a
+# subshell, then invoke gbrain through Bun with the runtime preload.
+
+set -euo pipefail
+
+PATCHKIT_HOME="${GBRAIN_PATCHKIT_HOME:-$HOME/.gbrain-patchkit}"
+ENV_FILE="$PATCHKIT_HOME/env.sh"
+
+if [ -f "$ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+fi
+
+bun_bin="${GBRAIN_BUN:-}"
+if [ -z "$bun_bin" ]; then
+  bun_bin="$(command -v bun 2>/dev/null || true)"
+fi
+
+if [ -n "${GBRAIN_ENTRY:-}" ] && [ -f "$GBRAIN_ENTRY" ] \
+   && [ -n "${GBRAIN_OVERRIDE_JS:-}" ] && [ -f "$GBRAIN_OVERRIDE_JS" ] \
+   && [ -n "$bun_bin" ] && [ -x "$bun_bin" ]; then
+  exec "$bun_bin" --preload "$GBRAIN_OVERRIDE_JS" "$GBRAIN_ENTRY" "$@"
+fi
+
+# Fallback to the real gbrain binary, avoiding this shim and patchkit's bin dir
+# to prevent recursion. This keeps `gbrain` usable even before onboard/migrate.
+IFS=':' read -r -a path_parts <<< "${PATH:-}"
+for dir in "${path_parts[@]}"; do
+  [ -n "$dir" ] || continue
+  candidate="$dir/gbrain"
+  [ -x "$candidate" ] || continue
+  case "$candidate" in
+    "$PATCHKIT_HOME/bin/gbrain"|"$HOME/.local/bin/gbrain") continue ;;
+  esac
+  exec "$candidate" "$@"
+done
+
+echo "gbrain-patchkit: could not locate a runnable gbrain. Run: gbrain-patchkit onboard" >&2
+exit 127

@@ -8,6 +8,7 @@
 #
 # Layout:
 #   ~/.gbrain-patchkit/bin/gbrain-patchkit     (this tool)
+#   ~/.gbrain-patchkit/bin/gbrain              (non-interactive command shim)
 #   ~/.gbrain-patchkit/substitutions.json      (editable patch rules)
 #   ~/.gbrain-patchkit/env.sh                  (your keys + models, sourced from ~/.zshrc)
 #   ~/.gbrain-patchkit/apply.log               (append-only audit log)
@@ -35,6 +36,7 @@ CONFIG="$PATCHKIT_HOME/substitutions.json"
 CONFIG_DEFAULT="$PATCHKIT_HOME/substitutions.default.json"
 ENV_FILE="$PATCHKIT_HOME/env.sh"
 LOG="$PATCHKIT_HOME/apply.log"
+PATH_SHIM="$HOME/.local/bin/gbrain"
 
 QUIET=0
 FLAGS=()
@@ -66,6 +68,12 @@ resolve_gbrain_src() {
   fi
   local bin real pkg_dir
   bin="$(command -v gbrain)"
+  # command -v may return a bare name (no /) when gbrain is a shell function.
+  # realpath("gbrain") resolves relative to cwd, not PATH — use whence -p
+  # (zsh) or which to get the actual path in that case.
+  if [[ "$bin" != */* ]]; then
+    bin="$(whence -p gbrain 2>/dev/null || command -v gbrain)"
+  fi
   real="$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$bin")"
   pkg_dir="$(dirname "$real")"
   while [ "$pkg_dir" != "/" ] && [ ! -f "$pkg_dir/package.json" ]; do
@@ -274,6 +282,47 @@ EOF
   else
     say "[install] added hook to $rc_file — run: source $rc_file"
   fi
+}
+
+install_path_shim() {
+  local shim_src="$PATCHKIT_HOME/bin/gbrain"
+  local shim_dst="$PATH_SHIM"
+  local shim_dir
+  shim_dir="$(dirname "$shim_dst")"
+
+  if [ ! -f "$shim_src" ]; then
+    say "[install] command shim missing at $shim_src — non-interactive gbrain calls may bypass patchkit"
+    return
+  fi
+
+  mkdir -p "$shim_dir"
+
+  if [ -L "$shim_dst" ]; then
+    local target
+    target="$(readlink "$shim_dst" || true)"
+    if [ "$target" = "$shim_src" ]; then
+      say "[install] command shim already present at $shim_dst"
+      return
+    fi
+    say "[install] $shim_dst already points to $target; leaving it unchanged"
+    say "[install] non-interactive callers should put $PATCHKIT_HOME/bin before the native gbrain bin"
+    return
+  fi
+
+  if [ -e "$shim_dst" ]; then
+    if grep -q 'gbrain-patchkit command shim' "$shim_dst" 2>/dev/null; then
+      cp "$shim_src" "$shim_dst"
+      chmod +x "$shim_dst"
+      say "[install] refreshed command shim at $shim_dst"
+      return
+    fi
+    say "[install] $shim_dst already exists and is not a patchkit shim; leaving it unchanged"
+    say "[install] non-interactive callers should put $PATCHKIT_HOME/bin before the native gbrain bin"
+    return
+  fi
+
+  ln -s "$shim_src" "$shim_dst"
+  say "[install] linked command shim at $shim_dst"
 }
 
 remove_shell_hook() {
@@ -812,9 +861,10 @@ cmd_upgrade() {
 cmd_install() {
   ensure_config
   install_shell_hook
+  install_path_shim
   : > "$LOG" 2>/dev/null || true
   say
-  say "Config seeded and shell hook installed."
+  say "Config seeded, shell hook installed, and command shim linked."
   say "For interactive setup of keys + models, run:  gbrain-patchkit onboard"
 }
 
@@ -938,8 +988,9 @@ PY
   ensure_preload_export "$src"
   info ""
 
-  # 5. Refresh shell hook (idempotent — bumps if version sentinel drifted).
+  # 5. Refresh shell hook and command shim (idempotent).
   install_shell_hook
+  install_path_shim
   info ""
 
   # 6. SDK shape smoke test.
@@ -958,6 +1009,7 @@ PY
   info ""
   info "  Open a new shell or run:  exec \$SHELL -l"
   info "  Then verify:              gbrain-patchkit doctor"
+  info "  Non-interactive callers:  ensure ~/.local/bin appears before the native gbrain bin on PATH"
   info ""
   info "  Your next \`cd ~/gbrain && git pull origin master && bun install\`"
   info "  should run without conflict (modulo the cli.ts mode bit if you"
@@ -1153,6 +1205,7 @@ cmd_onboard() {
   write_env_file "$openai" "$minimax" "$minimax_base" "$exp_model" "$sub_model"
   info "  ✓ wrote $ENV_FILE (includes BUN_PRELOAD for runtime override)"
   install_shell_hook
+  install_path_shim
   ensure_config
   # shellcheck disable=SC1090
   . "$ENV_FILE"

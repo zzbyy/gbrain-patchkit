@@ -9,8 +9,9 @@
 #   1. Clones (or updates) the gbrain-patchkit repo into ~/.gbrain-patchkit
 #   2. Seeds substitutions.json from the bundled default if not already present
 #   3. Ensures the tool is on PATH (adds to your shell rc)
-#   4. Runs the interactive onboarding wizard — prompts for keys, URL, models
-#   5. Applies the patches to your gbrain install
+#   4. Installs a ~/.local/bin/gbrain command shim for non-interactive callers
+#   5. Runs the interactive onboarding wizard — prompts for keys, URL, models
+#   6. Applies the patches to your gbrain install
 #
 # Re-run-safe: won't overwrite an existing env.sh or substitutions.json.
 
@@ -45,6 +46,7 @@ else
 fi
 
 chmod +x "$HOME_DIR/bin/gbrain-patchkit"
+[ -f "$HOME_DIR/bin/gbrain" ] && chmod +x "$HOME_DIR/bin/gbrain"
 
 # Seed substitutions.json if user doesn't have one yet (preserves their edits)
 if [ ! -f "$HOME_DIR/substitutions.json" ] && [ -f "$HOME_DIR/substitutions.default.json" ]; then
