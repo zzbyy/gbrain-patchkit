@@ -1,15 +1,15 @@
 // gbrain-patchkit Anthropic SDK runtime override.
 //
-// Loaded via BUN_PRELOAD (exported in env.sh, sourced inside the gbrain
-// shell-function wrapper). Monkey-patches @anthropic-ai/sdk's Messages
-// resource so model IDs in outbound calls are swapped from
-// claude-haiku-* / claude-sonnet-* to whatever GBRAIN_EXPANSION_MODEL /
-// GBRAIN_SUBAGENT_MODEL points at — without modifying gbrain source.
+// Loaded via `bun --preload` by the gbrain wrapper. Monkey-patches
+// @anthropic-ai/sdk's Messages
+// resource so model IDs in outbound calls are swapped from Claude-family
+// defaults to whatever cheaper Anthropic-compatible model you configured,
+// without modifying gbrain source.
 //
 // Replaces the source-patch mechanism. ~/gbrain stays untouched, git pull
 // just works.
 //
-// Module resolution note: BUN_PRELOAD-loaded files resolve `require()`
+// Module resolution note: preload-loaded files resolve `require()`
 // from the PRELOAD's directory, not the gbrain repo's. ~/.gbrain-patchkit/
 // has no node_modules, so a naive `require('@anthropic-ai/sdk/...')` here
 // fails silently. We use `createRequire(path.join(GBRAIN_SOURCE_DIR,
@@ -67,19 +67,49 @@
     return;
   }
 
+  const parseMap = () => {
+    const raw = process.env.GBRAIN_ANTHROPIC_MODEL_MAP || '';
+    if (!raw.trim()) return {};
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (e) {
+      process.stderr.write(
+        `[gbrain-patchkit] preload: invalid GBRAIN_ANTHROPIC_MODEL_MAP JSON: ${e && e.message}\n`
+      );
+      return {};
+    }
+  };
+
+  const familyOf = (model) => {
+    const m = String(model || '').toLowerCase();
+    if (m.includes('haiku')) return 'haiku';
+    if (m.includes('sonnet')) return 'sonnet';
+    if (m.includes('opus')) return 'opus';
+    return '';
+  };
+
+  const modelMap = parseMap();
+
+  const replacementFor = (model) => {
+    const env = process.env;
+    if (modelMap[model]) return modelMap[model];
+    const family = familyOf(model);
+    if (family && modelMap[family]) return modelMap[family];
+    if (family === 'haiku' && env.GBRAIN_EXPANSION_MODEL) return env.GBRAIN_EXPANSION_MODEL;
+    if (family === 'sonnet' && env.GBRAIN_SUBAGENT_MODEL) return env.GBRAIN_SUBAGENT_MODEL;
+    if (family === 'opus' && (env.GBRAIN_THINK_MODEL || env.GBRAIN_SUBAGENT_MODEL)) {
+      return env.GBRAIN_THINK_MODEL || env.GBRAIN_SUBAGENT_MODEL;
+    }
+    return '';
+  };
+
   const swap = (body) => {
     if (!body || typeof body !== 'object' || typeof body.model !== 'string') {
       return body;
     }
-    const m = body.model;
-    const env = process.env;
-    if (m.includes('haiku') && env.GBRAIN_EXPANSION_MODEL) {
-      return { ...body, model: env.GBRAIN_EXPANSION_MODEL };
-    }
-    if (m.includes('sonnet') && env.GBRAIN_SUBAGENT_MODEL) {
-      return { ...body, model: env.GBRAIN_SUBAGENT_MODEL };
-    }
-    return body;
+    const replacement = replacementFor(body.model);
+    return replacement ? { ...body, model: replacement } : body;
   };
 
   const wrap = (name) => {

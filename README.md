@@ -1,19 +1,22 @@
 # gbrain-patchkit
 
-Standalone companion tool for [gbrain](https://github.com/garrytan/gbrain) that lets you swap gbrain's hardcoded Anthropic model IDs for any Anthropic-compatible endpoint — MiniMax, a self-hosted [litellm](https://github.com/BerriAI/litellm) gateway, or anything else that speaks the Anthropic Messages API.
+Standalone companion tool for [gbrain](https://github.com/garrytan/gbrain) that lets you run the Anthropic-shaped parts of gbrain through cheaper models and keep those patches alive across upgrades.
 
-Set it up once. `~/gbrain` stays untouched, `git pull` works normally, and there's nothing to reapply after upgrades.
+It uses two mechanisms:
+
+1. A Bun preload that redirects direct `@anthropic-ai/sdk` Messages calls to your Anthropic-compatible model endpoint, for MiniMax-style providers.
+2. Small idempotent source patches that add missing OpenAI-compatible expansion touchpoints to gbrain recipes, for DeepSeek and LiteLLM/Kimi/MiniMax proxy setups.
 
 ## Why this exists
 
-gbrain hardcodes two model IDs in source:
+Current gbrain has two different LLM surfaces:
 
-- `src/core/search/expansion.ts` — Claude Haiku, for query expansion at search time
-- `src/core/minions/handlers/subagent.ts` — Claude Sonnet, default for `gbrain agent run`
+- Provider-gateway calls such as query expansion. These can use GBrain recipes like `deepseek:*` or `litellm:*` once the patchkit recipe patches are applied.
+- Direct Anthropic Messages calls in `think`, dream/cycle significance/synthesis, and Minions subagents. These still construct an Anthropic SDK client, so patchkit redirects them at runtime.
 
-If you don't have an Anthropic key (MiniMax-only, litellm, Ollama, etc.), those code paths fail. `gbrain-patchkit` redirects them to whatever endpoint + models you pick by setting `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` and `GBRAIN_EXPANSION_MODEL` / `GBRAIN_SUBAGENT_MODEL` in a scoped env file, then loading a Bun preload that intercepts the Anthropic SDK in-process and swaps model IDs at call time.
+If you don't have an Anthropic key, set a provider key in the scoped patchkit env as `ANTHROPIC_API_KEY` and point `ANTHROPIC_BASE_URL` at an Anthropic-compatible endpoint. The preload swaps Claude-family model IDs at call time using `GBRAIN_ANTHROPIC_MODEL_MAP`, `GBRAIN_SUBAGENT_MODEL`, and `GBRAIN_THINK_MODEL`.
 
-The Anthropic SDK already reads `ANTHROPIC_BASE_URL` from env natively, so redirecting to MiniMax requires no source change. The preload handles the model-ID part. **Net result: zero modifications to `~/gbrain`.**
+For query expansion through non-Anthropic providers, patchkit adds source-level recipe capabilities and reapplies them after every upgrade.
 
 ## Install (one line)
 
@@ -26,7 +29,7 @@ The installer clones this repo into `~/.gbrain-patchkit/`, adds a PATH export + 
 1. **OpenAI API key** — for embeddings only. Create a [restricted key](https://platform.openai.com/api-keys) with just `Embeddings: Request` enabled. Required for vector search.
 2. **MiniMax API key** (or any other Anthropic-compatible provider key) — for query expansion and `gbrain agent run`. Optional; skip it and search still works (just without the expansion recall boost).
 3. **Anthropic-compatible base URL** — e.g. `https://api.minimaxi.chat/anthropic`. Verify the current endpoint in your provider's docs.
-4. **Model names** — the IDs to substitute for Haiku (expansion) and Sonnet (subagent).
+4. **Model names** — the IDs to substitute for Claude-family direct Anthropic SDK calls.
 
 All four land in `~/.gbrain-patchkit/env.sh` with `600` perms. Nothing is sent anywhere.
 
@@ -62,7 +65,15 @@ gbrain() {
 }
 ```
 
-`env.sh` exports `GBRAIN_ENTRY` (the resolved path to `~/gbrain/src/cli.ts`), `GBRAIN_OVERRIDE_JS` (the preload), and `GBRAIN_SOURCE_DIR` (the gbrain repo root, used by the preload's module resolver). The wrapper invokes `bun --preload <override> <cli.ts>` directly: Bun runs the preload before any application code, and the preload monkey-patches `@anthropic-ai/sdk`'s `Messages.prototype.create` and `.stream` so outbound `claude-haiku-*` calls get routed to `GBRAIN_EXPANSION_MODEL` and `claude-sonnet-*` calls to `GBRAIN_SUBAGENT_MODEL`. Because matching is by model *family*, upstream version bumps (`claude-haiku-4-5-...` → `claude-haiku-5-...`) don't break anything — there are no version strings to chase.
+`env.sh` exports `GBRAIN_ENTRY` (the resolved path to `~/gbrain/src/cli.ts`), `GBRAIN_OVERRIDE_JS` (the preload), and `GBRAIN_SOURCE_DIR` (the gbrain repo root, used by the preload's module resolver). The wrapper invokes `bun --preload <override> <cli.ts>` directly: Bun runs the preload before any application code, and the preload monkey-patches `@anthropic-ai/sdk`'s `Messages.prototype.create` and `.stream`.
+
+The model replacement is family-based and optionally exact-model based:
+
+```bash
+export GBRAIN_ANTHROPIC_MODEL_MAP='{"haiku":"MiniMax-M2.7","sonnet":"MiniMax-M2.7","opus":"MiniMax-M2.7"}'
+```
+
+Legacy fallbacks still work: `GBRAIN_EXPANSION_MODEL` for Haiku-shaped calls, `GBRAIN_SUBAGENT_MODEL` for Sonnet-shaped calls, and `GBRAIN_THINK_MODEL` for Opus-shaped calls.
 
 (The wrapper bypasses the `bun link` shim and calls Bun directly because Bun has no env-var equivalent for `--preload` — `BUN_PRELOAD` is not a thing in Bun 1.3.x. The CLI flag is the only reliable hook point.)
 
@@ -70,7 +81,21 @@ The non-interactive command shim performs the same flow from an executable: it s
 
 The keys + model choices live in `env.sh`, scoped to the wrapper process so they don't leak into Claude Code, codex, or other Anthropic-SDK tools running in the same parent shell.
 
-`~/gbrain` is never modified. `cd ~/gbrain && git pull origin master && bun install` runs without conflict. There's no "reapply after upgrade" step — the override engages on every `gbrain` invocation that goes through either wrapper regardless of upstream version.
+The runtime override does not modify `~/gbrain`. The enabled recipe patches do modify `~/gbrain/src/core/ai/recipes/*.ts`, but only through marker-based idempotent substitutions. After a successful `gbrain upgrade`, the wrapper runs `gbrain-patchkit post-upgrade` to refresh pointers and reapply enabled patches.
+
+For cheap query expansion without using your OpenAI key beyond embeddings:
+
+```bash
+# DeepSeek direct
+export DEEPSEEK_API_KEY=...
+export GBRAIN_EXPANSION_MODEL=deepseek:deepseek-chat
+
+# Or through a local LiteLLM proxy for MiniMax/Kimi/etc.
+export LITELLM_BASE_URL=http://localhost:4000
+export GBRAIN_EXPANSION_MODEL=litellm:minimax-m2.7
+```
+
+Put those exports in `~/.gbrain-patchkit/env.sh` so they are scoped to `gbrain`.
 
 ### Drift detection
 
@@ -78,18 +103,19 @@ If a future Anthropic SDK release reshapes its `Messages` resource so the preloa
 
 ### Legacy source-patch path (still available)
 
-The pre-runtime-override mechanism — find/replace edits committed to `~/gbrain/src/...` — is still available for users who want to add custom source modifications the runtime override can't address (e.g. patching constants outside the SDK call path). Add entries to `~/.gbrain-patchkit/substitutions.json` and run `gbrain-patchkit apply`. The two original default substitutions (`GBRAIN_EXPANSION_MODEL` / `GBRAIN_SUBAGENT_MODEL`) ship with `enabled: false` and should be left disabled — the runtime override handles them.
+The source-patch mechanism is still available for code the runtime override cannot reach. The two original `GBRAIN_EXPANSION_MODEL` / `GBRAIN_SUBAGENT_MODEL` substitutions stay disabled because the preload handles direct Anthropic SDK calls. The enabled defaults patch provider recipes for cheap query expansion.
 
 ## Commands
 
 ```
 gbrain-patchkit onboard        interactive setup (keys, URL, models, env + hook + smoke test)
 gbrain-patchkit migrate        switch existing source-patch installs to runtime override (idempotent)
+gbrain-patchkit post-upgrade   refresh runtime pointers + reapply enabled source patches
 gbrain-patchkit upgrade        stash → git pull ~/gbrain → bun install → pop → post-upgrade
 gbrain-patchkit doctor         verify env + preload + SDK shape + patch state
 gbrain-patchkit env            open env.sh in $EDITOR
 gbrain-patchkit edit           open substitutions.json in $EDITOR (custom source patches)
-gbrain-patchkit apply          apply every enabled substitution (legacy source-patch path)
+gbrain-patchkit apply          apply every enabled substitution
 gbrain-patchkit check          show status of every substitution
 gbrain-patchkit revert         undo every substitution
 gbrain-patchkit locate         print the resolved gbrain source directory
@@ -103,13 +129,13 @@ If you installed an older patchkit that wrote to `~/gbrain/src/`:
 
 ```bash
 gbrain-patchkit update     # pull the new patchkit (brings anthropic-override.js)
-gbrain-patchkit migrate    # revert any active source patches, wire BUN_PRELOAD into env.sh,
+gbrain-patchkit migrate    # revert obsolete source patches, wire runtime override pointers,
                            # smoke-test the SDK, optionally fix the cli.ts mode flip
 exec $SHELL -l             # reload your shell so the new env.sh is sourced
 gbrain-patchkit doctor     # verify everything green
 ```
 
-After this, `cd ~/gbrain && git pull origin master && bun install` runs without conflict, and there is nothing to reapply after the pull.
+After this, use `gbrain-patchkit upgrade` or `gbrain upgrade` through the patchkit wrapper so enabled recipe patches are reapplied after the pull.
 
 ## Files
 
@@ -120,9 +146,9 @@ After this, `cd ~/gbrain && git pull origin master && bun install` runs without 
 ├── anthropic-override.js        (Bun preload — runtime SDK override, shipped in this repo)
 ├── install.sh                   (installer, shipped in this repo)
 ├── README.md                    (this file)
-├── substitutions.default.json   (shipped default substitutions, all disabled)
+├── substitutions.default.json   (shipped default substitutions)
 ├── substitutions.json           (user's substitution config, seeded from default on install)
-├── env.sh                       (user's keys + models + BUN_PRELOAD, 600 perms, sourced from shell rc)
+├── env.sh                       (user's keys + models + runtime pointers, 600 perms, sourced from shell rc)
 └── apply.log                    (append-only audit log for source-patch operations)
 ```
 
@@ -130,7 +156,7 @@ After this, `cd ~/gbrain && git pull origin master && bun install` runs without 
 
 ## Custom source patches (advanced)
 
-The runtime override (`anthropic-override.js`) handles the two default model substitutions. If you need to modify gbrain source for something the runtime override can't reach — a non-SDK constant, a guard clause, an injected import — fall back to the legacy source-patch path: add an entry to `~/.gbrain-patchkit/substitutions.json` with `enabled: true`, then run `gbrain-patchkit apply`.
+The runtime override (`anthropic-override.js`) handles direct Anthropic SDK model substitutions. Source patches handle provider recipe gaps and anything the runtime override cannot reach. Add an entry to `~/.gbrain-patchkit/substitutions.json` with `enabled: true`, then run `gbrain-patchkit apply`.
 
 ```json
 {
@@ -149,7 +175,7 @@ Three rules:
 2. **`marker`** must appear in `replace` but **not** in `find` — that's how re-runs detect already-patched state.
 3. **`file`** is a repo-relative path under the resolved gbrain source dir.
 
-Caveat: source patches make the gbrain working tree dirty and `git pull` will abort until you `gbrain-patchkit revert`. The runtime override exists specifically to avoid this dance — prefer extending `anthropic-override.js` when feasible.
+Caveat: source patches make the gbrain working tree dirty. Use `gbrain-patchkit upgrade` or the patchkit `gbrain upgrade` wrapper so the tool stashes, upgrades, and reapplies patches in a controlled order.
 
 ## Scope & safety
 
@@ -176,7 +202,7 @@ rm -rf ~/.gbrain-patchkit
 
 ## Upstream status
 
-The ideal long-term fix is making gbrain itself read `GBRAIN_EXPANSION_MODEL` and `GBRAIN_SUBAGENT_MODEL` natively — a two-line change. If/when that lands upstream, the runtime override becomes redundant (it'll still run harmlessly, since the env var precedence will already match what the preload would have substituted). At that point you can either leave it in place or run `gbrain-patchkit uninstall` to drop the shell hook entirely.
+The ideal long-term fix is upstream provider-neutral coverage for all think/dream/minion paths. When gbrain stops constructing direct Anthropic SDK clients for those paths and exposes MiniMax/Kimi/DeepSeek recipes natively, this patchkit can shrink back to upgrade hygiene or be uninstalled.
 
 ## Known wart (upstream): cli.ts mode flip
 

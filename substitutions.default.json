@@ -1,5 +1,5 @@
 {
-  "description": "Source-patch defaults — DISABLED. As of the runtime-override redesign, gbrain-patchkit no longer modifies ~/gbrain source files for the Haiku/Sonnet model IDs. Instead, anthropic-override.js (loaded via BUN_PRELOAD from env.sh) intercepts Messages.create at SDK call time and swaps models based on GBRAIN_EXPANSION_MODEL / GBRAIN_SUBAGENT_MODEL. These entries are kept here so existing installs can `gbrain-patchkit revert` cleanly, and so anyone who really wants source-edit behavior can flip `enabled: true`. New users should leave them as-is. Add your own entries below if you need to patch other gbrain source for reasons the runtime override can't address.",
+  "description": "Patch defaults for current gbrain. Runtime Anthropic SDK calls are handled by anthropic-override.js, so the old Haiku/Sonnet source substitutions stay disabled. The enabled source patches add cheap OpenAI-compatible expansion touchpoints where upstream gbrain currently exposes chat only. gbrain-patchkit post-upgrade reapplies enabled patches after gbrain upgrades.",
   "substitutions": [
     {
       "name": "env-driven expansion model (legacy source patch — superseded by anthropic-override.js)",
@@ -18,6 +18,46 @@
       "marker": "GBRAIN_SUBAGENT_MODEL",
       "find": "const DEFAULT_MODEL = 'claude-sonnet-4-6';",
       "replace": "const DEFAULT_MODEL = process.env.GBRAIN_SUBAGENT_MODEL ?? 'claude-sonnet-4-6';"
+    },
+    {
+      "name": "DeepSeek can serve query expansion",
+      "enabled": true,
+      "file": "src/core/ai/recipes/deepseek.ts",
+      "marker": "GBRAIN_PATCHKIT_DEEPSEEK_EXPANSION",
+      "find": "  touchpoints: {\n    chat: {",
+      "replace": "  touchpoints: {\n    expansion: {\n      // GBRAIN_PATCHKIT_DEEPSEEK_EXPANSION: DeepSeek chat models are good enough for cheap query rewrites.\n      models: ['deepseek-chat', 'deepseek-reasoner'],\n      cost_per_1m_tokens_usd: 0.14,\n      price_last_verified: '2026-04-20',\n    },\n    chat: {"
+    },
+    {
+      "name": "LiteLLM can serve query expansion and chat",
+      "enabled": true,
+      "file": "src/core/ai/recipes/litellm-proxy.ts",
+      "marker": "GBRAIN_PATCHKIT_LITELLM_EXPANSION_CHAT",
+      "find": "  touchpoints: {\n    embedding: {\n      // Models depend on the proxy's config; declare empties so wizard prompts user.\n      models: [],\n      default_dims: 0, // user must declare --embedding-dimensions explicitly\n      cost_per_1m_tokens_usd: undefined,\n      price_last_verified: '2026-04-20',\n    },\n  },",
+      "replace": "  touchpoints: {\n    embedding: {\n      // Models depend on the proxy's config; declare empties so wizard prompts user.\n      models: [],\n      default_dims: 0, // user must declare --embedding-dimensions explicitly\n      cost_per_1m_tokens_usd: undefined,\n      price_last_verified: '2026-04-20',\n    },\n    expansion: {\n      // GBRAIN_PATCHKIT_LITELLM_EXPANSION_CHAT: LiteLLM normalizes MiniMax, Kimi, DeepSeek, and others.\n      models: [],\n      cost_per_1m_tokens_usd: undefined,\n      price_last_verified: '2026-05-10',\n    },\n    chat: {\n      models: [],\n      supports_tools: true,\n      supports_subagent_loop: false,\n      supports_prompt_cache: false,\n      cost_per_1m_input_usd: undefined,\n      cost_per_1m_output_usd: undefined,\n      price_last_verified: '2026-05-10',\n    },\n  },"
+    },
+    {
+      "name": "OpenAI-compatible expansion honors *_BASE_URL and *_API_KEY optional env",
+      "enabled": true,
+      "file": "src/core/ai/gateway.ts",
+      "marker": "GBRAIN_PATCHKIT_OPENAI_COMPAT_EXPANSION_ENV",
+      "find": "    case 'openai-compatible': {\n      const baseUrl = cfg.base_urls?.[recipe.id] ?? recipe.base_url_default;\n      if (!baseUrl) throw new AIConfigError(`${recipe.name} requires a base URL.`, recipe.setup_hint);\n      const apiKey = recipe.auth_env?.required[0]\n        ? cfg.env[recipe.auth_env.required[0]]\n        : 'unauthenticated';\n      return createOpenAICompatible({",
+      "replace": "    case 'openai-compatible': {\n      // GBRAIN_PATCHKIT_OPENAI_COMPAT_EXPANSION_ENV: allow LiteLLM-style env-only setup.\n      const baseUrlEnv = recipe.auth_env?.optional?.find(k => k.endsWith('_BASE_URL'));\n      const keyEnv = recipe.auth_env?.required[0] ?? recipe.auth_env?.optional?.find(k => k.endsWith('_API_KEY'));\n      const baseUrl = cfg.base_urls?.[recipe.id] ?? (baseUrlEnv ? cfg.env[baseUrlEnv] : undefined) ?? recipe.base_url_default;\n      if (!baseUrl) throw new AIConfigError(`${recipe.name} requires a base URL.`, recipe.setup_hint);\n      const apiKey = keyEnv ? cfg.env[keyEnv] : 'unauthenticated';\n      return createOpenAICompatible({"
+    },
+    {
+      "name": "Bare Anthropic-compatible expansion model ids route to anthropic provider",
+      "enabled": true,
+      "file": "src/core/ai/model-resolver.ts",
+      "marker": "GBRAIN_PATCHKIT_BARE_ANTHROPIC_MODEL",
+      "find": "  const colon = id.indexOf(':');\n  if (colon === -1) {\n    throw new AIConfigError(\n      `Model id \"${id}\" is missing a provider prefix.`,\n      'Use format provider:model, e.g. openai:text-embedding-3-large',\n    );\n  }",
+      "replace": "  const colon = id.indexOf(':');\n  if (colon === -1) {\n    if (process.env.ANTHROPIC_BASE_URL && id.trim()) {\n      // GBRAIN_PATCHKIT_BARE_ANTHROPIC_MODEL: MiniMax/OpenClaw gateways often use bare Anthropic-compatible model ids.\n      return { providerId: 'anthropic', modelId: id.trim() };\n    }\n    throw new AIConfigError(\n      `Model id \"${id}\" is missing a provider prefix.`,\n      'Use format provider:model, e.g. openai:text-embedding-3-large',\n    );\n  }"
+    },
+    {
+      "name": "Anthropic-compatible gateways may use non-Claude model ids",
+      "enabled": true,
+      "file": "src/core/ai/model-resolver.ts",
+      "marker": "GBRAIN_PATCHKIT_ALLOW_ANTHROPIC_COMPAT_MODELS",
+      "find": "  if (supportedModels.length > 0 && !supportedModels.includes(modelId)) {\n    // Non-fatal: providers like ollama/litellm accept arbitrary model ids. We only warn for native providers.\n    if (recipe.tier === 'native') {",
+      "replace": "  if (supportedModels.length > 0 && !supportedModels.includes(modelId)) {\n    // GBRAIN_PATCHKIT_ALLOW_ANTHROPIC_COMPAT_MODELS: ANTHROPIC_BASE_URL can point at MiniMax/Kimi/OpenClaw gateways.\n    if (recipe.id === 'anthropic' && process.env.ANTHROPIC_BASE_URL) return;\n    // Non-fatal: providers like ollama/litellm accept arbitrary model ids. We only warn for native providers.\n    if (recipe.tier === 'native') {"
     }
   ]
 }

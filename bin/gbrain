@@ -24,6 +24,14 @@ fi
 if [ -n "${GBRAIN_ENTRY:-}" ] && [ -f "$GBRAIN_ENTRY" ] \
    && [ -n "${GBRAIN_OVERRIDE_JS:-}" ] && [ -f "$GBRAIN_OVERRIDE_JS" ] \
    && [ -n "$bun_bin" ] && [ -x "$bun_bin" ]; then
+  if [ "${1:-}" = "upgrade" ]; then
+    "$bun_bin" --preload "$GBRAIN_OVERRIDE_JS" "$GBRAIN_ENTRY" "$@"
+    rc=$?
+    if [ "$rc" -eq 0 ] && [ -x "$PATCHKIT_HOME/bin/gbrain-patchkit" ]; then
+      "$PATCHKIT_HOME/bin/gbrain-patchkit" post-upgrade --quiet || true
+    fi
+    exit "$rc"
+  fi
   exec "$bun_bin" --preload "$GBRAIN_OVERRIDE_JS" "$GBRAIN_ENTRY" "$@"
 fi
 
@@ -37,6 +45,14 @@ for dir in "${path_parts[@]}"; do
   case "$candidate" in
     "$PATCHKIT_HOME/bin/gbrain"|"$HOME/.local/bin/gbrain") continue ;;
   esac
+  if [ "${1:-}" = "upgrade" ]; then
+    "$candidate" "$@"
+    rc=$?
+    if [ "$rc" -eq 0 ] && [ -x "$PATCHKIT_HOME/bin/gbrain-patchkit" ]; then
+      "$PATCHKIT_HOME/bin/gbrain-patchkit" post-upgrade --quiet || true
+    fi
+    exit "$rc"
+  fi
   exec "$candidate" "$@"
 done
 
