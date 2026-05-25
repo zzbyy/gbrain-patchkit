@@ -1,11 +1,12 @@
 # gbrain-patchkit
 
-Standalone companion tool for [gbrain](https://github.com/garrytan/gbrain) that lets you run the Anthropic-shaped parts of gbrain through cheaper models and keep those patches alive across upgrades.
+Standalone companion tool for [gbrain](https://github.com/garrytan/gbrain) that lets you run Anthropic-shaped or provider-missing parts of gbrain through local replacement paths and keep those patches alive across upgrades.
 
-It uses two mechanisms:
+It uses three mechanisms:
 
 1. A Bun preload that redirects direct `@anthropic-ai/sdk` Messages calls to your Anthropic-compatible model endpoint, for MiniMax-style providers.
 2. Small idempotent source patches that add missing OpenAI-compatible expansion touchpoints to gbrain recipes, for DeepSeek and LiteLLM/Kimi/MiniMax proxy setups.
+3. A git overlay patch, `patches/local-overlay.patch`, for larger local gbrain changes such as the Codex CLI provider overlay.
 
 ## Why this exists
 
@@ -14,7 +15,10 @@ Current gbrain has two different LLM surfaces:
 - Provider-gateway calls such as query expansion. These can use GBrain recipes like `deepseek:*` or `litellm:*` once the patchkit recipe patches are applied.
 - Direct Anthropic Messages calls in `think`, dream/cycle significance/synthesis, and Minions subagents. These still construct an Anthropic SDK client, so patchkit redirects them at runtime.
 
-If you don't have an Anthropic key, set a provider key in the scoped patchkit env as `ANTHROPIC_API_KEY` and point `ANTHROPIC_BASE_URL` at an Anthropic-compatible endpoint. The preload swaps Claude-family model IDs at call time using `GBRAIN_ANTHROPIC_MODEL_MAP`, `GBRAIN_SUBAGENT_MODEL`, and `GBRAIN_THINK_MODEL`.
+If you don't have an Anthropic key, you have two workable paths:
+
+- Anthropic-compatible endpoint: set a provider key in the scoped patchkit env as `ANTHROPIC_API_KEY` and point `ANTHROPIC_BASE_URL` at an Anthropic-compatible endpoint. The preload swaps Claude-family model IDs at call time using `GBRAIN_ANTHROPIC_MODEL_MAP`, `GBRAIN_SUBAGENT_MODEL`, and `GBRAIN_THINK_MODEL`.
+- Codex subscription: apply the Codex CLI overlay. It adds `codex:gpt-5.5` as a gbrain AI provider backed by `codex exec`, with no API key required.
 
 For query expansion through non-Anthropic providers, patchkit adds source-level recipe capabilities and reapplies them after every upgrade.
 
@@ -97,6 +101,37 @@ export GBRAIN_EXPANSION_MODEL=litellm:minimax-m2.7
 
 Put those exports in `~/.gbrain-patchkit/env.sh` so they are scoped to `gbrain`.
 
+## Codex CLI overlay profile
+
+`patches/local-overlay.patch` currently carries a narrow gbrain overlay that adds a first-class Codex CLI provider:
+
+- Provider/model: `codex:gpt-5.5`
+- Runner: `codex exec`
+- Auth: no API key; it uses your logged-in Codex CLI subscription
+- Supported: gateway chat, `think`, `auto_think`, and dream verdict/judge-style calls
+- Not supported in v1: tool calls, Minions/subagent loops, or any job that expects the model to call gbrain tools
+
+Recommended local model split:
+
+```bash
+# Embeddings/rerank stay on ZeroEntropy via ~/.gbrain/config.json or ZEROENTROPY_API_KEY.
+gbrain config set models.expansion openai:gpt-4o-mini
+
+# Heavy synthesis uses Codex CLI.
+gbrain config set models.think codex:gpt-5.5
+gbrain config set models.auto_think codex:gpt-5.5
+gbrain config set models.dream.synthesize_verdict codex:gpt-5.5
+```
+
+Do not point `models.subagent`, `models.tier.subagent`, `models.dream.synthesize`, or `models.dream.patterns` at Codex yet. Those paths need tool-call/subagent behavior that the CLI overlay intentionally does not claim.
+
+Smoke test after applying the overlay:
+
+```bash
+gbrain-patchkit overlay-check
+gbrain think --model codex:gpt-5.5 --json "What is 2+2? Answer briefly."
+```
+
 ### Drift detection
 
 If a future Anthropic SDK release reshapes its `Messages` resource so the preload's hook target moves, the runtime override silently no-ops and prints one stderr line at startup. `gbrain-patchkit doctor` runs an SDK shape smoke test (`bun -e "require('@anthropic-ai/sdk/resources/messages.js').Messages.prototype.create"`) and reports pass/fail loudly, so you find out fast.
@@ -113,6 +148,10 @@ gbrain-patchkit migrate        switch existing source-patch installs to runtime 
 gbrain-patchkit post-upgrade   refresh runtime pointers + reapply enabled source patches
 gbrain-patchkit upgrade        stash → git pull ~/gbrain → bun install → pop → post-upgrade
 gbrain-patchkit doctor         verify env + preload + SDK shape + patch state
+gbrain-patchkit overlay-snapshot  capture current ~/gbrain diff as a replayable git patch
+gbrain-patchkit overlay-apply     replay that git patch after upstream upgrades
+gbrain-patchkit overlay-check     report whether the overlay is applied/applicable
+gbrain-patchkit overlay-revert    reverse the overlay patch
 gbrain-patchkit env            open env.sh in $EDITOR
 gbrain-patchkit edit           open substitutions.json in $EDITOR (custom source patches)
 gbrain-patchkit apply          apply every enabled substitution
@@ -135,7 +174,19 @@ exec $SHELL -l             # reload your shell so the new env.sh is sourced
 gbrain-patchkit doctor     # verify everything green
 ```
 
-After this, use `gbrain-patchkit upgrade` or `gbrain upgrade` through the patchkit wrapper so enabled recipe patches are reapplied after the pull.
+After this, use `gbrain-patchkit upgrade` or `gbrain upgrade` through the patchkit wrapper so enabled source patches and the git overlay are reapplied after the pull.
+
+`gbrain-patchkit upgrade` is the safest default because it always runs the patchkit upgrade path explicitly. Plain `gbrain upgrade` is safe only when `gbrain` resolves to the patchkit shim. Check with:
+
+```bash
+gbrain-patchkit doctor
+```
+
+If doctor reports that native Bun `gbrain` is ahead of patchkit on `PATH`, either run `gbrain-patchkit upgrade` or put patchkit first:
+
+```bash
+export PATH="$HOME/.gbrain-patchkit/bin:$PATH"
+```
 
 ## Files
 
@@ -147,6 +198,7 @@ After this, use `gbrain-patchkit upgrade` or `gbrain upgrade` through the patchk
 ├── install.sh                   (installer, shipped in this repo)
 ├── README.md                    (this file)
 ├── substitutions.default.json   (shipped default substitutions)
+├── patches/local-overlay.patch  (optional git overlay replayed after gbrain upgrades)
 ├── substitutions.json           (user's substitution config, seeded from default on install)
 ├── env.sh                       (user's keys + models + runtime pointers, 600 perms, sourced from shell rc)
 └── apply.log                    (append-only audit log for source-patch operations)
@@ -157,6 +209,19 @@ After this, use `gbrain-patchkit upgrade` or `gbrain upgrade` through the patchk
 ## Custom source patches (advanced)
 
 The runtime override (`anthropic-override.js`) handles direct Anthropic SDK model substitutions. Source patches handle provider recipe gaps and anything the runtime override cannot reach. Add an entry to `~/.gbrain-patchkit/substitutions.json` with `enabled: true`, then run `gbrain-patchkit apply`.
+
+### Git overlay patch for local gbrain changes
+
+For larger local changes that add files or touch many modules, use the overlay commands instead of substitution rules:
+
+```bash
+gbrain-patchkit overlay-snapshot   # capture current ~/gbrain diff into patches/local-overlay.patch
+gbrain-patchkit overlay-check      # applied / applicable / drifted
+gbrain-patchkit overlay-apply      # replay after git pull
+gbrain-patchkit overlay-revert     # reverse it
+```
+
+`gbrain-patchkit post-upgrade` applies the overlay automatically when `patches/local-overlay.patch` exists. `gbrain-patchkit upgrade` first removes an already-applied overlay, pulls upstream on a clean base, then reapplies the overlay after the upgrade.
 
 ```json
 {

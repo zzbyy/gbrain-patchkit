@@ -2,7 +2,7 @@
   "description": "Patch defaults for current gbrain. Runtime Anthropic SDK calls are handled by anthropic-override.js, so the old Haiku/Sonnet source substitutions stay disabled. The enabled source patches add cheap OpenAI-compatible expansion touchpoints where upstream gbrain currently exposes chat only. gbrain-patchkit post-upgrade reapplies enabled patches after gbrain upgrades.",
   "substitutions": [
     {
-      "name": "env-driven expansion model (legacy source patch — superseded by anthropic-override.js)",
+      "name": "env-driven expansion model (legacy source patch \u2014 superseded by anthropic-override.js)",
       "enabled": false,
       "disabled_by": "runtime-override",
       "file": "src/core/search/expansion.ts",
@@ -11,7 +11,7 @@
       "replace": "model: process.env.GBRAIN_EXPANSION_MODEL ?? 'claude-haiku-4-5-20251001',"
     },
     {
-      "name": "env-driven subagent default model (legacy source patch — superseded by anthropic-override.js)",
+      "name": "env-driven subagent default model (legacy source patch \u2014 superseded by anthropic-override.js)",
       "enabled": false,
       "disabled_by": "runtime-override",
       "file": "src/core/minions/handlers/subagent.ts",
@@ -21,52 +21,58 @@
     },
     {
       "name": "DeepSeek can serve query expansion",
-      "enabled": true,
+      "enabled": false,
       "file": "src/core/ai/recipes/deepseek.ts",
       "marker": "GBRAIN_PATCHKIT_DEEPSEEK_EXPANSION",
       "find": "  touchpoints: {\n    chat: {",
-      "replace": "  touchpoints: {\n    expansion: {\n      // GBRAIN_PATCHKIT_DEEPSEEK_EXPANSION: DeepSeek chat models are good enough for cheap query rewrites.\n      models: ['deepseek-chat', 'deepseek-reasoner'],\n      cost_per_1m_tokens_usd: 0.14,\n      price_last_verified: '2026-04-20',\n    },\n    chat: {"
+      "replace": "  touchpoints: {\n    expansion: {\n      // GBRAIN_PATCHKIT_DEEPSEEK_EXPANSION: DeepSeek chat models are good enough for cheap query rewrites.\n      models: ['deepseek-chat', 'deepseek-reasoner'],\n      cost_per_1m_tokens_usd: 0.14,\n      price_last_verified: '2026-04-20',\n    },\n    chat: {",
+      "disabled_by": "codex-overlay"
     },
     {
       "name": "LiteLLM can serve query expansion and chat",
-      "enabled": true,
+      "enabled": false,
       "file": "src/core/ai/recipes/litellm-proxy.ts",
       "marker": "GBRAIN_PATCHKIT_LITELLM_EXPANSION_CHAT",
-      "find": "  touchpoints: {\n    embedding: {\n      // Models depend on the proxy's config; declare empties so wizard prompts user.\n      models: [],\n      user_provided_models: true, // v0.32 D8=A wire-through for the litellm hardcode\n      default_dims: 0, // user must declare --embedding-dimensions explicitly\n      cost_per_1m_tokens_usd: undefined,\n      price_last_verified: '2026-04-20',\n      // LiteLLM's batch capacity is determined by the backend it proxies;\n      // no static cap to declare here. v0.32 (#779).\n      no_batch_cap: true,\n      // v0.34.1 (#875): LiteLLM can forward to multimodal providers (OpenAI,\n      // Gemini, Voyage etc.). embedMultimodal routes openai-compatible\n      // recipes through embedMultimodalOpenAICompat() — same /embeddings\n      // endpoint as text, with content arrays carrying image_base64\n      // entries. No multimodal_models allow-list: the user knows which of\n      // their proxied models support multimodal; we trust the model id and\n      // surface the provider's rejection (D12 dim-validation catches\n      // mismatched-dim responses pre-storage).\n      supports_multimodal: true,\n    },\n  },",
-      "replace": "  touchpoints: {\n    embedding: {\n      // Models depend on the proxy's config; declare empties so wizard prompts user.\n      models: [],\n      user_provided_models: true, // v0.32 D8=A wire-through for the litellm hardcode\n      default_dims: 0, // user must declare --embedding-dimensions explicitly\n      cost_per_1m_tokens_usd: undefined,\n      price_last_verified: '2026-04-20',\n      // LiteLLM's batch capacity is determined by the backend it proxies;\n      // no static cap to declare here. v0.32 (#779).\n      no_batch_cap: true,\n      // v0.34.1 (#875): LiteLLM can forward to multimodal providers (OpenAI,\n      // Gemini, Voyage etc.). embedMultimodal routes openai-compatible\n      // recipes through embedMultimodalOpenAICompat() — same /embeddings\n      // endpoint as text, with content arrays carrying image_base64\n      // entries. No multimodal_models allow-list: the user knows which of\n      // their proxied models support multimodal; we trust the model id and\n      // surface the provider's rejection (D12 dim-validation catches\n      // mismatched-dim responses pre-storage).\n      supports_multimodal: true,\n    },\n    expansion: {\n      // GBRAIN_PATCHKIT_LITELLM_EXPANSION_CHAT: LiteLLM normalizes MiniMax, Kimi, DeepSeek, and others.\n      models: [],\n      cost_per_1m_tokens_usd: undefined,\n      price_last_verified: '2026-05-10',\n    },\n    chat: {\n      models: [],\n      supports_tools: true,\n      supports_subagent_loop: false,\n      supports_prompt_cache: false,\n      cost_per_1m_input_usd: undefined,\n      cost_per_1m_output_usd: undefined,\n      price_last_verified: '2026-05-10',\n    },\n  },"
+      "find": "  touchpoints: {\n    embedding: {\n      // Models depend on the proxy's config; declare empties so wizard prompts user.\n      models: [],\n      user_provided_models: true, // v0.32 D8=A wire-through for the litellm hardcode\n      default_dims: 0, // user must declare --embedding-dimensions explicitly\n      cost_per_1m_tokens_usd: undefined,\n      price_last_verified: '2026-04-20',\n      // LiteLLM's batch capacity is determined by the backend it proxies;\n      // no static cap to declare here. v0.32 (#779).\n      no_batch_cap: true,\n      // v0.34.1 (#875): LiteLLM can forward to multimodal providers (OpenAI,\n      // Gemini, Voyage etc.). embedMultimodal routes openai-compatible\n      // recipes through embedMultimodalOpenAICompat() \u2014 same /embeddings\n      // endpoint as text, with content arrays carrying image_base64\n      // entries. No multimodal_models allow-list: the user knows which of\n      // their proxied models support multimodal; we trust the model id and\n      // surface the provider's rejection (D12 dim-validation catches\n      // mismatched-dim responses pre-storage).\n      supports_multimodal: true,\n    },\n  },",
+      "replace": "  touchpoints: {\n    embedding: {\n      // Models depend on the proxy's config; declare empties so wizard prompts user.\n      models: [],\n      user_provided_models: true, // v0.32 D8=A wire-through for the litellm hardcode\n      default_dims: 0, // user must declare --embedding-dimensions explicitly\n      cost_per_1m_tokens_usd: undefined,\n      price_last_verified: '2026-04-20',\n      // LiteLLM's batch capacity is determined by the backend it proxies;\n      // no static cap to declare here. v0.32 (#779).\n      no_batch_cap: true,\n      // v0.34.1 (#875): LiteLLM can forward to multimodal providers (OpenAI,\n      // Gemini, Voyage etc.). embedMultimodal routes openai-compatible\n      // recipes through embedMultimodalOpenAICompat() \u2014 same /embeddings\n      // endpoint as text, with content arrays carrying image_base64\n      // entries. No multimodal_models allow-list: the user knows which of\n      // their proxied models support multimodal; we trust the model id and\n      // surface the provider's rejection (D12 dim-validation catches\n      // mismatched-dim responses pre-storage).\n      supports_multimodal: true,\n    },\n    expansion: {\n      // GBRAIN_PATCHKIT_LITELLM_EXPANSION_CHAT: LiteLLM normalizes MiniMax, Kimi, DeepSeek, and others.\n      models: [],\n      cost_per_1m_tokens_usd: undefined,\n      price_last_verified: '2026-05-10',\n    },\n    chat: {\n      models: [],\n      supports_tools: true,\n      supports_subagent_loop: false,\n      supports_prompt_cache: false,\n      cost_per_1m_input_usd: undefined,\n      cost_per_1m_output_usd: undefined,\n      price_last_verified: '2026-05-10',\n    },\n  },",
+      "disabled_by": "codex-overlay"
     },
     {
       "name": "LiteLLM base URL can come from LITELLM_BASE_URL",
-      "enabled": true,
+      "enabled": false,
       "file": "src/core/ai/recipes/litellm-proxy.ts",
       "marker": "GBRAIN_PATCHKIT_LITELLM_BASE_URL_ENV",
       "find": "  auth_env: {\n    required: [], // LITELLM_API_KEY is optional (users may run proxy unauthenticated locally)\n    optional: ['LITELLM_BASE_URL', 'LITELLM_API_KEY'],\n    setup_url: 'https://docs.litellm.ai/docs/proxy/quick_start',\n  },",
-      "replace": "  auth_env: {\n    required: [], // LITELLM_API_KEY is optional (users may run proxy unauthenticated locally)\n    optional: ['LITELLM_BASE_URL', 'LITELLM_API_KEY'],\n    setup_url: 'https://docs.litellm.ai/docs/proxy/quick_start',\n  },\n  resolveOpenAICompatConfig(env) {\n    // GBRAIN_PATCHKIT_LITELLM_BASE_URL_ENV: let non-wizard runs honor env-only LiteLLM setup.\n    return { baseURL: env.LITELLM_BASE_URL ?? 'http://localhost:4000' };\n  },"
+      "replace": "  auth_env: {\n    required: [], // LITELLM_API_KEY is optional (users may run proxy unauthenticated locally)\n    optional: ['LITELLM_BASE_URL', 'LITELLM_API_KEY'],\n    setup_url: 'https://docs.litellm.ai/docs/proxy/quick_start',\n  },\n  resolveOpenAICompatConfig(env) {\n    // GBRAIN_PATCHKIT_LITELLM_BASE_URL_ENV: let non-wizard runs honor env-only LiteLLM setup.\n    return { baseURL: env.LITELLM_BASE_URL ?? 'http://localhost:4000' };\n  },",
+      "disabled_by": "codex-overlay"
     },
     {
       "name": "OpenAI-compatible expansion honors *_BASE_URL and *_API_KEY optional env",
-      "enabled": true,
+      "enabled": false,
       "file": "src/core/ai/gateway.ts",
       "marker": "GBRAIN_PATCHKIT_OPENAI_COMPAT_EXPANSION_ENV",
       "find": "    case 'openai-compatible': {\n      const baseUrl = cfg.base_urls?.[recipe.id] ?? recipe.base_url_default;\n      if (!baseUrl) throw new AIConfigError(`${recipe.name} requires a base URL.`, recipe.setup_hint);\n      const apiKey = recipe.auth_env?.required[0]\n        ? cfg.env[recipe.auth_env.required[0]]\n        : 'unauthenticated';\n      return createOpenAICompatible({",
       "replace": "    case 'openai-compatible': {\n      // GBRAIN_PATCHKIT_OPENAI_COMPAT_EXPANSION_ENV: allow LiteLLM-style env-only setup.\n      const baseUrlEnv = recipe.auth_env?.optional?.find(k => k.endsWith('_BASE_URL'));\n      const keyEnv = recipe.auth_env?.required[0] ?? recipe.auth_env?.optional?.find(k => k.endsWith('_API_KEY'));\n      const baseUrl = cfg.base_urls?.[recipe.id] ?? (baseUrlEnv ? cfg.env[baseUrlEnv] : undefined) ?? recipe.base_url_default;\n      if (!baseUrl) throw new AIConfigError(`${recipe.name} requires a base URL.`, recipe.setup_hint);\n      const apiKey = keyEnv ? cfg.env[keyEnv] : 'unauthenticated';\n      return createOpenAICompatible({",
-      "upstream": "    case 'openai-compatible': {\n      // D12=A: unified auth via Recipe.resolveAuth (or default).\n      const auth = applyResolveAuth(recipe, cfg, 'expansion');\n      // v0.32: env-templated base URL + optional fetch wrapper.\n      const compat = applyOpenAICompatConfig(recipe, cfg);\n      return createOpenAICompatible({"
+      "upstream": "    case 'openai-compatible': {\n      // D12=A: unified auth via Recipe.resolveAuth (or default).\n      const auth = applyResolveAuth(recipe, cfg, 'expansion');\n      // v0.32: env-templated base URL + optional fetch wrapper.\n      const compat = applyOpenAICompatConfig(recipe, cfg);\n      return createOpenAICompatible({",
+      "disabled_by": "codex-overlay"
     },
     {
       "name": "Bare Anthropic-compatible expansion model ids route to anthropic provider",
-      "enabled": true,
+      "enabled": false,
       "file": "src/core/ai/model-resolver.ts",
       "marker": "GBRAIN_PATCHKIT_BARE_ANTHROPIC_MODEL",
       "find": "  const colon = id.indexOf(':');\n  if (colon === -1) {\n    throw new AIConfigError(\n      `Model id \"${id}\" is missing a provider prefix.`,\n      'Use format provider:model, e.g. openai:text-embedding-3-large',\n    );\n  }",
-      "replace": "  const colon = id.indexOf(':');\n  if (colon === -1) {\n    if (process.env.ANTHROPIC_BASE_URL && id.trim()) {\n      // GBRAIN_PATCHKIT_BARE_ANTHROPIC_MODEL: MiniMax/OpenClaw gateways often use bare Anthropic-compatible model ids.\n      return { providerId: 'anthropic', modelId: id.trim() };\n    }\n    throw new AIConfigError(\n      `Model id \"${id}\" is missing a provider prefix.`,\n      'Use format provider:model, e.g. openai:text-embedding-3-large',\n    );\n  }"
+      "replace": "  const colon = id.indexOf(':');\n  if (colon === -1) {\n    if (process.env.ANTHROPIC_BASE_URL && id.trim()) {\n      // GBRAIN_PATCHKIT_BARE_ANTHROPIC_MODEL: MiniMax/OpenClaw gateways often use bare Anthropic-compatible model ids.\n      return { providerId: 'anthropic', modelId: id.trim() };\n    }\n    throw new AIConfigError(\n      `Model id \"${id}\" is missing a provider prefix.`,\n      'Use format provider:model, e.g. openai:text-embedding-3-large',\n    );\n  }",
+      "disabled_by": "codex-overlay"
     },
     {
       "name": "Anthropic-compatible gateways may use non-Claude model ids",
-      "enabled": true,
+      "enabled": false,
       "file": "src/core/ai/model-resolver.ts",
       "marker": "GBRAIN_PATCHKIT_ALLOW_ANTHROPIC_COMPAT_MODELS",
       "find": "  if (supportedModels.length > 0 && !supportedModels.includes(modelId)) {\n    // Non-fatal: providers like ollama/litellm accept arbitrary model ids. We only warn for native providers.\n    if (recipe.tier === 'native') {",
-      "replace": "  if (supportedModels.length > 0 && !supportedModels.includes(modelId)) {\n    // GBRAIN_PATCHKIT_ALLOW_ANTHROPIC_COMPAT_MODELS: ANTHROPIC_BASE_URL can point at MiniMax/Kimi/OpenClaw gateways.\n    if (recipe.id === 'anthropic' && process.env.ANTHROPIC_BASE_URL) return;\n    // Non-fatal: providers like ollama/litellm accept arbitrary model ids. We only warn for native providers.\n    if (recipe.tier === 'native') {"
+      "replace": "  if (supportedModels.length > 0 && !supportedModels.includes(modelId)) {\n    // GBRAIN_PATCHKIT_ALLOW_ANTHROPIC_COMPAT_MODELS: ANTHROPIC_BASE_URL can point at MiniMax/Kimi/OpenClaw gateways.\n    if (recipe.id === 'anthropic' && process.env.ANTHROPIC_BASE_URL) return;\n    // Non-fatal: providers like ollama/litellm accept arbitrary model ids. We only warn for native providers.\n    if (recipe.tier === 'native') {",
+      "disabled_by": "codex-overlay"
     }
   ]
 }

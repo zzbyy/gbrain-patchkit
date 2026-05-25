@@ -20,6 +20,10 @@
 #   post-upgrade       refresh env pointers + reapply enabled patches after gbrain upgrade
 #   upgrade            stash → git pull ~/gbrain → bun install → pop → post-upgrade
 #   doctor             verify env + preload + patch state
+#   overlay-snapshot   capture current ~/gbrain diff as a git patch overlay
+#   overlay-apply      replay the git patch overlay after upstream upgrades
+#   overlay-check      show whether the git patch overlay is applied/applicable
+#   overlay-revert     reverse the git patch overlay
 #   apply [--quiet]    apply every enabled substitution
 #   check              show status of every substitution
 #   revert             undo every substitution
@@ -38,6 +42,15 @@ CONFIG_DEFAULT="$PATCHKIT_HOME/substitutions.default.json"
 ENV_FILE="$PATCHKIT_HOME/env.sh"
 LOG="$PATCHKIT_HOME/apply.log"
 PATH_SHIM="$HOME/.local/bin/gbrain"
+OVERLAY_PATCH="$PATCHKIT_HOME/patches/local-overlay.patch"
+
+# Load patchkit-scoped runtime pointers for non-interactive commands. This
+# keeps commands like `overlay-check` usable even when the caller's shell has
+# not sourced the install hook. Values stay inside this process.
+if [ -f "$ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+fi
 
 QUIET=0
 FLAGS=()
@@ -985,10 +998,111 @@ cmd_post_upgrade() {
       return "$rc"
     }
     smoke_test_preload "$src" || true
+    if [ -f "$OVERLAY_PATCH" ]; then
+      say "[post-upgrade] applying git overlay patch"
+      cmd_overlay_apply || {
+        local rc=$?
+        err "[post-upgrade] overlay patch needs attention (exit $rc). Run: gbrain-patchkit overlay-check"
+        return "$rc"
+      }
+    fi
   else
     err "[post-upgrade] could not locate gbrain source. Set GBRAIN_SOURCE_DIR and rerun."
     return 1
   fi
+}
+
+cmd_overlay_snapshot() {
+  local src
+  src="$(resolve_gbrain_src)"
+  if [ ! -d "$src/.git" ]; then
+    err "[overlay] $src is not a git checkout"
+    exit 1
+  fi
+  mkdir -p "$(dirname "$OVERLAY_PATCH")"
+  local tmp
+  tmp="$(mktemp)"
+  (
+    cd "$src"
+    git diff --binary
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      git diff --binary --no-index -- /dev/null "$f" || true
+    done < <(git ls-files --others --exclude-standard)
+  ) > "$tmp"
+  if [ ! -s "$tmp" ]; then
+    rm -f "$tmp"
+    err "[overlay] no local diff to snapshot in $src"
+    exit 1
+  fi
+  mv "$tmp" "$OVERLAY_PATCH"
+  info "[overlay] wrote $OVERLAY_PATCH"
+}
+
+overlay_reverse_check() {
+  local src="$1"
+  git -C "$src" apply --reverse --check "$OVERLAY_PATCH" >/dev/null 2>&1
+}
+
+overlay_forward_check() {
+  local src="$1"
+  git -C "$src" apply --check "$OVERLAY_PATCH" >/dev/null 2>&1
+}
+
+cmd_overlay_check() {
+  local src
+  src="$(resolve_gbrain_src)"
+  if [ ! -f "$OVERLAY_PATCH" ]; then
+    err "[overlay] missing patch: $OVERLAY_PATCH"
+    exit 1
+  fi
+  info "[overlay] source: $src"
+  info "[overlay] patch:  $OVERLAY_PATCH"
+  if overlay_reverse_check "$src"; then
+    info "[overlay] status: applied"
+  elif overlay_forward_check "$src"; then
+    info "[overlay] status: unpatched/applicable"
+  else
+    info "[overlay] status: drifted or partially applied"
+    info "[overlay] hint: run git -C $src apply --check $OVERLAY_PATCH for details"
+    exit 3
+  fi
+}
+
+cmd_overlay_apply() {
+  local src
+  src="$(resolve_gbrain_src)"
+  if [ ! -f "$OVERLAY_PATCH" ]; then
+    err "[overlay] missing patch: $OVERLAY_PATCH"
+    exit 1
+  fi
+  if overlay_reverse_check "$src"; then
+    info "[overlay] already applied"
+    return 0
+  fi
+  info "[overlay] applying $OVERLAY_PATCH"
+  if overlay_forward_check "$src"; then
+    git -C "$src" apply --whitespace=nowarn "$OVERLAY_PATCH"
+  else
+    git -C "$src" apply --3way --whitespace=nowarn "$OVERLAY_PATCH"
+  fi
+  info "[overlay] applied"
+}
+
+cmd_overlay_revert() {
+  local src
+  src="$(resolve_gbrain_src)"
+  if [ ! -f "$OVERLAY_PATCH" ]; then
+    err "[overlay] missing patch: $OVERLAY_PATCH"
+    exit 1
+  fi
+  if overlay_forward_check "$src"; then
+    info "[overlay] already unpatched"
+    return 0
+  fi
+  info "[overlay] reverting $OVERLAY_PATCH"
+  git -C "$src" apply --reverse --whitespace=nowarn "$OVERLAY_PATCH"
+  info "[overlay] reverted"
 }
 
 # Upgrade the user's gbrain checkout end-to-end: stash → git pull → bun install →
@@ -1012,7 +1126,17 @@ cmd_upgrade() {
 
   info "[upgrade] gbrain source: $src"
 
-  # 1. Stash any working-tree dirt (mode-flips, half-applied patches, anything).
+  # 0. If the git overlay is currently applied, remove it before pulling.
+  # Reapplying the overlay after the pull gives git a clean upstream base and
+  # avoids stash-pop conflicts for our own maintained changes.
+  local overlay_removed=0
+  if [ -f "$OVERLAY_PATCH" ] && overlay_reverse_check "$src"; then
+    info "[upgrade] overlay currently applied — reverting before pull"
+    cmd_overlay_revert
+    overlay_removed=1
+  fi
+
+  # 1. Stash any remaining working-tree dirt (user edits, mode flips, etc.).
   local stashed=0
   local stash_msg="gbrain-patchkit-upgrade-$(date +%s)"
   if [ -n "$(git -C "$src" status --porcelain)" ]; then
@@ -1021,6 +1145,7 @@ cmd_upgrade() {
       stashed=1
     else
       err "[upgrade] git stash failed; aborting"
+      if [ "$overlay_removed" = "1" ]; then cmd_overlay_apply || true; fi
       exit 1
     fi
   else
@@ -1034,6 +1159,10 @@ cmd_upgrade() {
     if [ "$stashed" = "1" ]; then
       err "[upgrade]   your stashed changes are at: stash@{0} ($stash_msg)"
       err "[upgrade]   restore with: git -C $src stash pop"
+    fi
+    if [ "$overlay_removed" = "1" ]; then
+      err "[upgrade]   re-applying overlay so your local gbrain keeps working"
+      cmd_overlay_apply || true
     fi
     exit 1
   fi
@@ -1133,7 +1262,17 @@ cmd_doctor() {
   done
   info ""
   if command -v gbrain >/dev/null 2>&1; then
-    info "[doctor] gbrain on PATH:  $(command -v gbrain)"
+    local gbrain_cmd gbrain_real patchkit_real
+    gbrain_cmd="$(command -v gbrain)"
+    gbrain_real="$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$gbrain_cmd" 2>/dev/null || printf '%s' "$gbrain_cmd")"
+    patchkit_real="$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$PATCHKIT_HOME" 2>/dev/null || printf '%s' "$PATCHKIT_HOME")"
+    info "[doctor] gbrain on PATH:  $gbrain_cmd"
+    if [[ "$gbrain_real" == "$patchkit_real/bin/gbrain" || "$gbrain_real" == "$PATCHKIT_HOME/bin/gbrain" ]]; then
+      info "[doctor] upgrade hook:   ✓ patchkit shim will run post-upgrade overlay replay"
+    else
+      info "[doctor] upgrade hook:   ⚠ native gbrain is ahead of patchkit on PATH"
+      info "                         Use \`gbrain-patchkit upgrade\`, or put $PATCHKIT_HOME/bin before native gbrain so \`gbrain upgrade\` replays the overlay."
+    fi
   else
     info "[doctor] gbrain on PATH:  (not found)"
   fi
@@ -1500,6 +1639,10 @@ main() {
     migrate)   cmd_migrate ;;
     post-upgrade) cmd_post_upgrade ;;
     upgrade)   cmd_upgrade ;;
+    overlay-snapshot) cmd_overlay_snapshot ;;
+    overlay-apply)    cmd_overlay_apply ;;
+    overlay-check)    cmd_overlay_check ;;
+    overlay-revert)   cmd_overlay_revert ;;
     apply)     cmd_apply ;;
     check)     cmd_check ;;
     revert)    cmd_revert ;;

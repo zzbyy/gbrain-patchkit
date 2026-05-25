@@ -1,0 +1,760 @@
+diff --git a/src/core/ai/dims.ts b/src/core/ai/dims.ts
+index 4f170e8f..174c860b 100644
+--- a/src/core/ai/dims.ts
++++ b/src/core/ai/dims.ts
+@@ -142,7 +142,8 @@ export function dimsProviderOptions(
+       return undefined;
+     }
+     case 'native-anthropic':
+-      // Anthropic has no embedding model.
++    case 'codex-cli':
++      // Anthropic and Codex CLI have no embedding model.
+       return undefined;
+     case 'openai-compatible':
+       // ZE zembed-1 — flexible Matryoshka dims + asymmetric input_type.
+diff --git a/src/core/ai/gateway.ts b/src/core/ai/gateway.ts
+index 05ac7a7b..67832b62 100644
+--- a/src/core/ai/gateway.ts
++++ b/src/core/ai/gateway.ts
+@@ -23,6 +23,10 @@
+
+ import { embed as aiEmbed, embedMany, generateObject, generateText } from 'ai';
+ import { AsyncLocalStorage } from 'node:async_hooks';
++import { spawn } from 'node:child_process';
++import { mkdtemp, readFile, rm } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
+ import { listRecipes } from './recipes/index.ts';
+ import { createOpenAI } from '@ai-sdk/openai';
+ import { createGoogleGenerativeAI } from '@ai-sdk/google';
+@@ -77,6 +81,22 @@ const DEFAULT_RERANKER_MODEL = 'zeroentropyai:zerank-2';
+ let _config: AIGatewayConfig | null = null;
+ const _modelCache = new Map<string, any>();
+
++interface CodexCliExecutorOpts {
++  stdin: string;
++  env: Record<string, string>;
++  cwd: string;
++  timeoutMs: number;
++  abortSignal?: AbortSignal;
++}
++
++export type CodexCliExecutor = (
++  file: string,
++  args: string[],
++  opts: CodexCliExecutorOpts,
++) => Promise<{ stdout: string; stderr: string }>;
++
++let _codexCliExecutor: CodexCliExecutor = defaultCodexCliExecutor;
++
+ /**
+  * v0.31.12 recipe-models merge: per-gateway-instance set of model ids the
+  * user opted into via config. Keyed by provider id (`anthropic`, `openai`,
+@@ -502,6 +522,7 @@ export function resetGateway(): void {
+   _shrinkState.clear();
+   _embedTransport = embedMany;
+   _chatTransport = null;
++  _codexCliExecutor = defaultCodexCliExecutor;
+   _warnedRecipes.clear();
+   _extendedModels.clear();
+ }
+@@ -536,6 +557,17 @@ export function __setChatTransportForTests(
+   _chatTransport = fn;
+ }
+
++/**
++ * Test-only seam for the Codex CLI bridge. Production code shells out to the
++ * `codex` executable; tests inject a fake executor so no subscription tokens
++ * are spent.
++ *
++ * @internal exported for tests; not part of the public gateway API.
++ */
++export function __setCodexCliExecutorForTests(fn: CodexCliExecutor | null): void {
++  _codexCliExecutor = fn ?? defaultCodexCliExecutor;
++}
++
+ function requireConfig(): AIGatewayConfig {
+   if (!_config) {
+     throw new AIConfigError(
+@@ -1850,6 +1882,212 @@ export async function embedMultimodalSafe(
+   return { embeddings, failedIndices, lastError };
+ }
+
++// ---- Codex CLI bridge ----
++
++interface CodexCliRunResult {
++  text: string;
++  usage: ChatResult['usage'];
++  stderr?: string;
++}
++
++function envSnapshotForChild(env: Record<string, string | undefined>): Record<string, string> {
++  const out: Record<string, string> = {};
++  for (const [k, v] of Object.entries(env)) {
++    if (typeof v === 'string') out[k] = v;
++  }
++  return out;
++}
++
++function parsePositiveInt(raw: string | undefined, fallback: number): number {
++  if (!raw) return fallback;
++  const n = parseInt(raw, 10);
++  return Number.isFinite(n) && n > 0 ? n : fallback;
++}
++
++function envFlag(raw: string | undefined, fallback: boolean): boolean {
++  if (raw === undefined) return fallback;
++  const lower = raw.trim().toLowerCase();
++  if (['0', 'false', 'no', 'off'].includes(lower)) return false;
++  if (['1', 'true', 'yes', 'on'].includes(lower)) return true;
++  return fallback;
++}
++
++function normalizeCodexUsage(raw: unknown): ChatResult['usage'] {
++  const u = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
++  return {
++    input_tokens: Number(u.input_tokens ?? u.inputTokens ?? u.prompt_tokens ?? u.promptTokens ?? 0),
++    output_tokens: Number(u.output_tokens ?? u.outputTokens ?? u.completion_tokens ?? u.completionTokens ?? 0),
++    cache_read_tokens: Number(u.cached_input_tokens ?? u.cache_read_input_tokens ?? u.cacheReadInputTokens ?? 0),
++    cache_creation_tokens: Number(u.cache_creation_input_tokens ?? u.cacheCreationInputTokens ?? 0),
++  };
++}
++
++function parseCodexJsonl(stdout: string): { lastAgentText: string; usage: ChatResult['usage'] } {
++  let lastAgentText = '';
++  let usage: ChatResult['usage'] = {
++    input_tokens: 0,
++    output_tokens: 0,
++    cache_read_tokens: 0,
++    cache_creation_tokens: 0,
++  };
++
++  for (const line of stdout.split(/\r?\n/)) {
++    const trimmed = line.trim();
++    if (!trimmed.startsWith('{')) continue;
++    let parsed: any;
++    try {
++      parsed = JSON.parse(trimmed);
++    } catch {
++      continue;
++    }
++    if (parsed?.type === 'item.completed' && parsed.item?.type === 'agent_message') {
++      if (typeof parsed.item.text === 'string') lastAgentText = parsed.item.text;
++    }
++    if (parsed?.type === 'turn.completed' && parsed.usage) {
++      usage = normalizeCodexUsage(parsed.usage);
++    }
++  }
++
++  return { lastAgentText, usage };
++}
++
++async function defaultCodexCliExecutor(
++  file: string,
++  args: string[],
++  opts: CodexCliExecutorOpts,
++): Promise<{ stdout: string; stderr: string }> {
++  const maxBuffer = 16 * 1024 * 1024;
++  return await new Promise((resolve, reject) => {
++    const child = spawn(file, args, {
++      cwd: opts.cwd,
++      env: opts.env,
++      stdio: ['pipe', 'pipe', 'pipe'],
++    });
++
++    let stdout = '';
++    let stderr = '';
++    let settled = false;
++
++    const finish = (err?: Error, result?: { stdout: string; stderr: string }) => {
++      if (settled) return;
++      settled = true;
++      clearTimeout(timer);
++      opts.abortSignal?.removeEventListener('abort', onAbort);
++      if (err) reject(err);
++      else resolve(result ?? { stdout, stderr });
++    };
++
++    const onAbort = () => {
++      child.kill('SIGTERM');
++      finish(new Error('Codex CLI call aborted'));
++    };
++
++    const timer = setTimeout(() => {
++      child.kill('SIGTERM');
++      finish(new Error(`Codex CLI timed out after ${opts.timeoutMs}ms`));
++    }, opts.timeoutMs);
++
++    opts.abortSignal?.addEventListener('abort', onAbort, { once: true });
++
++    child.on('error', err => {
++      const nodeErr = err as NodeJS.ErrnoException;
++      if (nodeErr.code === 'ENOENT') {
++        finish(new AIConfigError(
++          `Codex CLI executable not found: ${file}`,
++          'Install/sign in to Codex CLI, or set GBRAIN_CODEX_BIN to the codex executable path.',
++          err,
++        ));
++        return;
++      }
++      finish(err instanceof Error ? err : new Error(String(err)));
++    });
++    child.stdout?.on('data', chunk => {
++      stdout += String(chunk);
++      if (stdout.length > maxBuffer) {
++        child.kill('SIGTERM');
++        finish(new Error('Codex CLI stdout exceeded 16 MiB'));
++      }
++    });
++    child.stderr?.on('data', chunk => {
++      stderr += String(chunk);
++      if (stderr.length > maxBuffer) {
++        child.kill('SIGTERM');
++        finish(new Error('Codex CLI stderr exceeded 16 MiB'));
++      }
++    });
++    child.on('close', (code, signal) => {
++      if (code === 0) {
++        finish(undefined, { stdout, stderr });
++      } else {
++        finish(new Error(`Codex CLI exited with code ${code ?? 'null'}${signal ? ` signal ${signal}` : ''}: ${stderr.slice(0, 2000)}`));
++      }
++    });
++
++    child.stdin?.end(opts.stdin);
++  });
++}
++
++async function runCodexCliText(
++  modelId: string,
++  prompt: string,
++  opts: { abortSignal?: AbortSignal } = {},
++): Promise<CodexCliRunResult> {
++  const cfg = requireConfig();
++  if (cfg.env.GBRAIN_CODEX_BRIDGE_DEPTH) {
++    throw new AIConfigError(
++      'Codex CLI bridge refused recursive invocation.',
++      'Unset GBRAIN_CODEX_BRIDGE_DEPTH only if you are intentionally debugging nested Codex runs.',
++    );
++  }
++
++  const timeoutMs = parsePositiveInt(cfg.env.GBRAIN_CODEX_TIMEOUT_MS, 600_000);
++  const codexBin = cfg.env.GBRAIN_CODEX_BIN || 'codex';
++  const sandbox = cfg.env.GBRAIN_CODEX_SANDBOX || 'read-only';
++  const ignoreRules = envFlag(cfg.env.GBRAIN_CODEX_IGNORE_RULES, true);
++  const cwd = await mkdtemp(join(tmpdir(), 'gbrain-codex-'));
++  const outputPath = join(cwd, 'last-message.txt');
++  const args = [
++    'exec',
++    '--json',
++    '--ephemeral',
++    '--model', modelId,
++    '--sandbox', sandbox,
++    '--skip-git-repo-check',
++    '--cd', cwd,
++    '--output-last-message', outputPath,
++  ];
++  if (ignoreRules) args.push('--ignore-rules');
++  args.push('-');
++
++  try {
++    const env = {
++      ...envSnapshotForChild(cfg.env),
++      GBRAIN_CODEX_BRIDGE_DEPTH: '1',
++    };
++    const { stdout, stderr } = await _codexCliExecutor(codexBin, args, {
++      stdin: prompt,
++      env,
++      cwd,
++      timeoutMs,
++      abortSignal: opts.abortSignal,
++    });
++    const parsed = parseCodexJsonl(stdout);
++    let fileText = '';
++    try {
++      fileText = await readFile(outputPath, 'utf8');
++    } catch {
++      // Fall back to JSONL agent_message below.
++    }
++    const text = (fileText || parsed.lastAgentText).trim();
++    if (!text) {
++      throw new Error(`Codex CLI returned no assistant text${stderr ? `: ${stderr.slice(0, 1000)}` : ''}`);
++    }
++    return { text, usage: parsed.usage, stderr };
++  } finally {
++    await rm(cwd, { recursive: true, force: true });
++  }
++}
++
+ // ---- Expansion ----
+
+ async function resolveExpansionProvider(modelStr: string): Promise<{ model: any; recipe: Recipe; modelId: string }> {
+@@ -1895,6 +2133,8 @@ function instantiateExpansion(recipe: Recipe, modelId: string, cfg: AIGatewayCon
+         ...auth,
+       }).languageModel(modelId);
+     }
++    case 'codex-cli':
++      return { __codexCli: true, modelId };
+   }
+ }
+
+@@ -1902,6 +2142,27 @@ const ExpansionSchema = z.object({
+   queries: z.array(z.string()).min(1).max(5),
+ });
+
++function parseExpansionQueriesFromText(text: string): string[] {
++  const trimmed = text.trim()
++    .replace(/^```(?:json)?\s*/i, '')
++    .replace(/\s*```$/i, '')
++    .trim();
++  const candidates = [trimmed];
++  const objectMatch = /\{[\s\S]*\}/.exec(trimmed);
++  if (objectMatch && objectMatch[0] !== trimmed) candidates.push(objectMatch[0]);
++
++  for (const candidate of candidates) {
++    try {
++      const parsed = JSON.parse(candidate);
++      const checked = ExpansionSchema.safeParse(parsed);
++      if (checked.success) return checked.data.queries;
++    } catch {
++      // Try the next candidate.
++    }
++  }
++  return [];
++}
++
+ /**
+  * Expand a search query into up to 4 related queries.
+  * Returns the original query PLUS expansions. On failure, returns just the original.
+@@ -1913,6 +2174,27 @@ export async function expand(query: string): Promise<string[]> {
+
+   try {
+     const { model, recipe, modelId } = await resolveExpansionProvider(getExpansionModel());
++    if (recipe.implementation === 'codex-cli') {
++      const result = await runCodexCliText(
++        modelId,
++        [
++          'Rewrite the search query below into 3-4 different, related queries that would help find relevant documents.',
++          'Return ONLY JSON in this exact shape: {"queries":["..."]}.',
++          'Do NOT include the original query in the result.',
++          'Each rewrite should emphasize different aspects, synonyms, or framings.',
++          '',
++          `Query: ${query}`,
++        ].join('\n'),
++      );
++      const expansions = parseExpansionQueriesFromText(result.text);
++      const seen = new Set<string>();
++      return [query, ...expansions].filter(q => {
++        const k = q.toLowerCase().trim();
++        if (seen.has(k)) return false;
++        seen.add(k);
++        return !!q.trim();
++      });
++    }
+     const result = await generateObject({
+       model,
+       schema: ExpansionSchema,
+@@ -2097,6 +2379,35 @@ export interface ChatOpts {
+   cacheSystem?: boolean;
+ }
+
++function renderCodexChatContent(content: string | ChatBlock[]): string {
++  if (typeof content === 'string') return content;
++  return content.map(block => {
++    if (block.type === 'text') return block.text;
++    if (block.type === 'tool-call') {
++      return `<tool_call name="${block.toolName}" id="${block.toolCallId}">\n${JSON.stringify(block.input)}\n</tool_call>`;
++    }
++    return `<tool_result name="${block.toolName}" id="${block.toolCallId}"${block.isError ? ' error="true"' : ''}>\n${JSON.stringify(block.output)}\n</tool_result>`;
++  }).join('\n\n');
++}
++
++function renderCodexChatPrompt(opts: ChatOpts): string {
++  const messages = opts.messages.map(m => [
++    `<message role="${m.role}">`,
++    renderCodexChatContent(m.content),
++    '</message>',
++  ].join('\n')).join('\n\n');
++
++  return [
++    'You are serving as gbrain\'s non-tool chat/synthesis model.',
++    'Follow the system and user messages exactly. Return only the final answer requested by the prompt.',
++    '',
++    opts.system ? `<system>\n${opts.system}\n</system>` : '',
++    '<messages>',
++    messages,
++    '</messages>',
++  ].filter(Boolean).join('\n');
++}
++
+ async function resolveChatProvider(modelStr: string): Promise<{ model: any; recipe: Recipe; modelId: string }> {
+   const { parsed, recipe } = resolveRecipe(modelStr);
+   assertTouchpoint(recipe, 'chat', parsed.modelId, getExtendedModelsForProvider(parsed.providerId));
+@@ -2140,6 +2451,8 @@ function instantiateChat(recipe: Recipe, modelId: string, cfg: AIGatewayConfig):
+         ...auth,
+       }).languageModel(modelId);
+     }
++    case 'codex-cli':
++      return { __codexCli: true, modelId };
+     default:
+       throw new AIConfigError(`Unknown implementation: ${(recipe as any).implementation}`);
+   }
+@@ -2275,6 +2588,42 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
+     }
+   };
+
++  if (recipe.implementation === 'codex-cli') {
++    if (opts.tools && opts.tools.length > 0) {
++      throw new AIConfigError(
++        `Codex CLI provider does not support GBrain tool calls.`,
++        `Use a tool-capable provider for models.subagent / models.tier.subagent; keep codex:${modelId} for think/synthesis-style jobs.`,
++      );
++    }
++    try {
++      const result = await runCodexCliText(modelId, renderCodexChatPrompt(opts), {
++        abortSignal: opts.abortSignal,
++      });
++      _recordBudget(`${recipe.id}:${modelId}`, result.usage.input_tokens, result.usage.output_tokens);
++      return {
++        text: result.text,
++        blocks: [{ type: 'text', text: result.text }],
++        stopReason: 'end',
++        usage: result.usage,
++        model: `${recipe.id}:${modelId}`,
++        providerId: recipe.id,
++        providerMetadata: {
++          codex: {
++            stderr: result.stderr,
++            bridge: 'codex exec',
++          },
++        },
++      };
++    } catch (err) {
++      const fallback = _extractUsageFromError(err, {
++        inputTokens: estimatedInputTokens,
++        outputTokens: maxOutputTokens,
++      });
++      _recordBudget(`${recipe.id}:${modelId}`, fallback.inputTokens, fallback.outputTokens);
++      throw normalizeAIError(err, `chat(${recipe.id}:${modelId})`);
++    }
++  }
++
+   try {
+     const result = await generateText({
+       model,
+diff --git a/src/core/ai/recipes/index.ts b/src/core/ai/recipes/index.ts
+index 244f00e8..605eed01 100644
+--- a/src/core/ai/recipes/index.ts
++++ b/src/core/ai/recipes/index.ts
+@@ -22,6 +22,7 @@ import { dashscope } from './dashscope.ts';
+ import { zhipu } from './zhipu.ts';
+ import { azureOpenAI } from './azure-openai.ts';
+ import { zeroentropyai } from './zeroentropyai.ts';
++import { codex } from './codex.ts';
+
+ const ALL: Recipe[] = [
+   openai,
+@@ -40,6 +41,7 @@ const ALL: Recipe[] = [
+   zhipu,
+   azureOpenAI,
+   zeroentropyai,
++  codex,
+ ];
+
+ /** Map from `provider:id` key to recipe. */
+diff --git a/src/core/ai/types.ts b/src/core/ai/types.ts
+index bb8fe76b..aa1e4b58 100644
+--- a/src/core/ai/types.ts
++++ b/src/core/ai/types.ts
+@@ -22,7 +22,8 @@ export type Implementation =
+   | 'native-openai'
+   | 'native-google'
+   | 'native-anthropic'
+-  | 'openai-compatible';
++  | 'openai-compatible'
++  | 'codex-cli';
+
+ export interface EmbeddingTouchpoint {
+   models: string[];
+diff --git a/src/core/cycle/synthesize.ts b/src/core/cycle/synthesize.ts
+index 9828a4f3..f3e98767 100644
+--- a/src/core/cycle/synthesize.ts
++++ b/src/core/cycle/synthesize.ts
+@@ -26,7 +26,7 @@
+  *   - Daily token budget cap (cooldown bounds spend at v1 scale).
+  */
+
+-import Anthropic from '@anthropic-ai/sdk';
++import type Anthropic from '@anthropic-ai/sdk';
+ import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
+ import { join, dirname } from 'node:path';
+ import type { BrainEngine } from '../engine.ts';
+@@ -38,6 +38,8 @@ import { discoverTranscripts, type DiscoveredTranscript } from './transcript-dis
+ import { serializeMarkdown, serializePageToMarkdown } from '../markdown.ts';
+ import type { Page, PageType } from '../types.ts';
+ import { validateSourceId } from '../utils.ts';
++import { chat as gatewayChat } from '../ai/gateway.ts';
++import { AIConfigError } from '../ai/errors.ts';
+
+ // Slug regex from validatePageSlug — kept in sync.
+ // Used for the orchestrator-written summary index slug.
+@@ -293,10 +295,10 @@ export async function runPhaseSynthesize(
+       return ok('no transcripts to process', { transcripts_processed: 0, pages_written: 0 });
+     }
+
+-    // Significance verdicts (cached in dream_verdicts; Haiku on miss).
++    // Significance verdicts (cached in dream_verdicts; cheap model on miss).
+     const worthProcessing: DiscoveredTranscript[] = [];
+     const verdicts: Array<{ filePath: string; worth: boolean; reasons: string[]; cached: boolean }> = [];
+-    const haiku = makeHaikuClient(); // null if no API key
++    const judge = makeJudgeClient(config.verdictModel);
+     for (const t of transcripts) {
+       const cached = await engine.getDreamVerdict(t.filePath, t.contentHash);
+       if (cached) {
+@@ -304,15 +306,17 @@ export async function runPhaseSynthesize(
+         if (cached.worth_processing) worthProcessing.push(t);
+         continue;
+       }
+-      if (!haiku) {
+-        // No API key — can't judge. Skip with explicit reason; don't crash phase.
+-        verdicts.push({ filePath: t.filePath, worth: false, reasons: ['no ANTHROPIC_API_KEY for significance judge'], cached: false });
+-        continue;
++      try {
++        const verdict = await judgeSignificance(judge, t, config.verdictModel);
++        await engine.putDreamVerdict(t.filePath, t.contentHash, verdict);
++        verdicts.push({ filePath: t.filePath, worth: verdict.worth_processing, reasons: verdict.reasons, cached: false });
++        if (verdict.worth_processing) worthProcessing.push(t);
++      } catch (e) {
++        const reason = e instanceof AIConfigError
++          ? `significance judge unavailable: ${e.message}`
++          : `significance judge failed: ${(e as Error).message}`;
++        verdicts.push({ filePath: t.filePath, worth: false, reasons: [reason], cached: false });
+       }
+-      const verdict = await judgeSignificance(haiku, t, config.verdictModel);
+-      await engine.putDreamVerdict(t.filePath, t.contentHash, verdict);
+-      verdicts.push({ filePath: t.filePath, worth: verdict.worth_processing, reasons: verdict.reasons, cached: false });
+-      if (verdict.worth_processing) worthProcessing.push(t);
+     }
+
+     // Dry-run stops here: significance filter ran (Haiku verdicts cached),
+@@ -639,10 +643,41 @@ export interface JudgeClient {
+   create: (params: Anthropic.MessageCreateParamsNonStreaming) => Promise<Anthropic.Message>;
+ }
+
+-function makeHaikuClient(): JudgeClient | null {
+-  if (!process.env.ANTHROPIC_API_KEY) return null;
+-  const client = new Anthropic();
+-  return { create: client.messages.create.bind(client.messages) };
++function chatResultToJudgeMessage(text: string, model: string): Anthropic.Message {
++  return {
++    id: '',
++    type: 'message',
++    role: 'assistant',
++    model,
++    content: [{ type: 'text', text }],
++    stop_reason: 'end_turn',
++    stop_sequence: null,
++    usage: { input_tokens: 0, output_tokens: 0 },
++  } as Anthropic.Message;
++}
++
++function makeJudgeClient(model: string): JudgeClient {
++  const modelStr = model.includes(':') ? model : `anthropic:${model}`;
++  return {
++    create: async (params): Promise<Anthropic.Message> => {
++      const messages = params.messages.map(m => ({
++        role: m.role,
++        content: typeof m.content === 'string'
++          ? m.content
++          : (Array.isArray(m.content) ? m.content.map(b => 'text' in b ? b.text : '').join('') : ''),
++      }));
++      const system = typeof params.system === 'string'
++        ? params.system
++        : (Array.isArray(params.system) ? params.system.map(b => 'text' in b ? b.text : '').join('') : undefined);
++      const result = await gatewayChat({
++        model: modelStr,
++        system,
++        messages,
++        maxTokens: params.max_tokens,
++      });
++      return chatResultToJudgeMessage(result.text, modelStr);
++    },
++  };
+ }
+
+ interface VerdictResult {
+diff --git a/src/core/ai/recipes/codex.ts b/src/core/ai/recipes/codex.ts
+new file mode 100644
+index 00000000..4bb7b83c
+--- /dev/null
++++ b/src/core/ai/recipes/codex.ts
+@@ -0,0 +1,36 @@
++import type { Recipe } from '../types.ts';
++
++export const codex: Recipe = {
++  id: 'codex',
++  name: 'Codex CLI',
++  tier: 'native',
++  implementation: 'codex-cli',
++  auth_env: {
++    required: [],
++    optional: [
++      'GBRAIN_CODEX_BIN',
++      'GBRAIN_CODEX_TIMEOUT_MS',
++      'GBRAIN_CODEX_SANDBOX',
++      'GBRAIN_CODEX_IGNORE_RULES',
++    ],
++    setup_url: 'https://developers.openai.com/codex',
++  },
++  touchpoints: {
++    expansion: {
++      models: ['gpt-5.5', 'gpt-5.2', 'gpt-5', 'gpt-4o-mini'],
++      cost_per_1m_tokens_usd: undefined,
++      price_last_verified: '2026-05-25',
++    },
++    chat: {
++      models: ['gpt-5.5', 'gpt-5.2', 'gpt-5', 'gpt-4o', 'gpt-4o-mini'],
++      supports_tools: false,
++      supports_subagent_loop: false,
++      supports_prompt_cache: false,
++      max_context_tokens: 200000,
++      cost_per_1m_input_usd: undefined,
++      cost_per_1m_output_usd: undefined,
++      price_last_verified: '2026-05-25',
++    },
++  },
++  setup_hint: 'Install and sign in to Codex CLI, then use models like `codex:gpt-5.5` for non-tool chat/synthesis jobs.',
++};
+diff --git a/test/ai/codex-cli-gateway.test.ts b/test/ai/codex-cli-gateway.test.ts
+new file mode 100644
+index 00000000..438097aa
+--- /dev/null
++++ b/test/ai/codex-cli-gateway.test.ts
+@@ -0,0 +1,127 @@
++import { describe, expect, test, beforeEach } from 'bun:test';
++import { writeFile } from 'node:fs/promises';
++import {
++  __setCodexCliExecutorForTests,
++  chat,
++  configureGateway,
++  expand,
++  resetGateway,
++  type CodexCliExecutor,
++} from '../../src/core/ai/gateway.ts';
++import { classifyCapabilities } from '../../src/core/ai/capabilities.ts';
++import { getRecipe } from '../../src/core/ai/recipes/index.ts';
++
++describe('Codex CLI gateway provider', () => {
++  const calls: Array<{ file: string; args: string[]; stdin: string; env: Record<string, string> }> = [];
++
++  beforeEach(() => {
++    calls.length = 0;
++    resetGateway();
++    configureGateway({
++      chat_model: 'codex:gpt-5.5',
++      expansion_model: 'codex:gpt-5.5',
++      env: {
++        HOME: '/tmp/gbrain-codex-test-home',
++        PATH: '/usr/bin:/bin',
++      },
++    });
++  });
++
++  function installExecutor(answer: string, usage = { input_tokens: 12, output_tokens: 3, cached_input_tokens: 4 }) {
++    const executor: CodexCliExecutor = async (file, args, opts) => {
++      calls.push({ file, args, stdin: opts.stdin, env: opts.env });
++      const outputIdx = args.indexOf('--output-last-message');
++      expect(outputIdx).toBeGreaterThanOrEqual(0);
++      await writeFile(args[outputIdx + 1]!, answer);
++      return {
++        stdout: [
++          'WARNING: harmless non-json line',
++          JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'fallback text' } }),
++          JSON.stringify({ type: 'turn.completed', usage }),
++        ].join('\n'),
++        stderr: '',
++      };
++    };
++    __setCodexCliExecutorForTests(executor);
++  }
++
++  test('registers codex:gpt-5.5 as chat-capable but not subagent/tool capable', () => {
++    const recipe = getRecipe('codex');
++    expect(recipe).toBeDefined();
++    expect(recipe!.touchpoints.chat?.models).toContain('gpt-5.5');
++    expect(recipe!.touchpoints.chat?.supports_tools).toBe(false);
++    expect(recipe!.touchpoints.chat?.supports_subagent_loop).toBe(false);
++    expect(classifyCapabilities('codex:gpt-5.5')).toBe('unusable:no_tools');
++  });
++
++  test('runs chat through codex exec without API keys', async () => {
++    installExecutor('{"answer":"ok","citations":[],"gaps":[]}');
++
++    const result = await chat({
++      model: 'codex:gpt-5.5',
++      system: 'Return JSON only.',
++      messages: [{ role: 'user', content: 'Answer with ok.' }],
++      maxTokens: 100,
++    });
++
++    expect(result.providerId).toBe('codex');
++    expect(result.model).toBe('codex:gpt-5.5');
++    expect(result.text).toBe('{"answer":"ok","citations":[],"gaps":[]}');
++    expect(result.usage).toEqual({
++      input_tokens: 12,
++      output_tokens: 3,
++      cache_read_tokens: 4,
++      cache_creation_tokens: 0,
++    });
++    expect(calls).toHaveLength(1);
++    expect(calls[0]!.file).toBe('codex');
++    expect(calls[0]!.args).toContain('exec');
++    expect(calls[0]!.args).toContain('--ephemeral');
++    expect(calls[0]!.args).toContain('--ignore-rules');
++    expect(calls[0]!.args).toContain('gpt-5.5');
++    expect(calls[0]!.args.at(-1)).toBe('-');
++    expect(calls[0]!.stdin).toContain('<system>');
++    expect(calls[0]!.stdin).toContain('Return JSON only.');
++    expect(calls[0]!.env.GBRAIN_CODEX_BRIDGE_DEPTH).toBe('1');
++  });
++
++  test('rejects tool calls before spending a codex exec turn', async () => {
++    installExecutor('should not run');
++
++    await expect(chat({
++      model: 'codex:gpt-5.5',
++      messages: [{ role: 'user', content: 'Use a tool.' }],
++      tools: [{ name: 'put_page', description: 'write', inputSchema: { type: 'object' } }],
++    })).rejects.toThrow('does not support GBrain tool calls');
++    expect(calls).toHaveLength(0);
++  });
++
++  test('refuses recursive codex bridge invocation', async () => {
++    installExecutor('should not run');
++    configureGateway({
++      chat_model: 'codex:gpt-5.5',
++      env: {
++        GBRAIN_CODEX_BRIDGE_DEPTH: '1',
++      },
++    });
++
++    await expect(chat({
++      model: 'codex:gpt-5.5',
++      messages: [{ role: 'user', content: 'hello' }],
++    })).rejects.toThrow('refused recursive invocation');
++    expect(calls).toHaveLength(0);
++  });
++
++  test('can serve expansion when explicitly configured', async () => {
++    installExecutor('{"queries":["startup investor notes","founder update history"]}');
++
++    const queries = await expand('founder traction update memo');
++
++    expect(queries).toEqual([
++      'founder traction update memo',
++      'startup investor notes',
++      'founder update history',
++    ]);
++    expect(calls[0]!.stdin).toContain('Return ONLY JSON');
++  });
++});
