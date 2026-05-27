@@ -13,7 +13,7 @@ index 4f170e8f..174c860b 100644
      case 'openai-compatible':
        // ZE zembed-1 — flexible Matryoshka dims + asymmetric input_type.
 diff --git a/src/core/ai/gateway.ts b/src/core/ai/gateway.ts
-index 05ac7a7b..67832b62 100644
+index 7225a05c..604ef297 100644
 --- a/src/core/ai/gateway.ts
 +++ b/src/core/ai/gateway.ts
 @@ -23,6 +23,10 @@
@@ -50,15 +50,15 @@ index 05ac7a7b..67832b62 100644
  /**
   * v0.31.12 recipe-models merge: per-gateway-instance set of model ids the
   * user opted into via config. Keyed by provider id (`anthropic`, `openai`,
-@@ -502,6 +522,7 @@ export function resetGateway(): void {
-   _shrinkState.clear();
+@@ -508,6 +528,7 @@ export function resetGateway(): void {
    _embedTransport = embedMany;
+   _embedTransportInstalled = false;
    _chatTransport = null;
 +  _codexCliExecutor = defaultCodexCliExecutor;
    _warnedRecipes.clear();
    _extendedModels.clear();
  }
-@@ -536,6 +557,17 @@ export function __setChatTransportForTests(
+@@ -543,6 +564,17 @@ export function __setChatTransportForTests(
    _chatTransport = fn;
  }
 
@@ -76,7 +76,7 @@ index 05ac7a7b..67832b62 100644
  function requireConfig(): AIGatewayConfig {
    if (!_config) {
      throw new AIConfigError(
-@@ -1850,6 +1882,212 @@ export async function embedMultimodalSafe(
+@@ -1958,6 +1990,212 @@ export async function embedMultimodalSafe(
    return { embeddings, failedIndices, lastError };
  }
 
@@ -289,7 +289,7 @@ index 05ac7a7b..67832b62 100644
  // ---- Expansion ----
 
  async function resolveExpansionProvider(modelStr: string): Promise<{ model: any; recipe: Recipe; modelId: string }> {
-@@ -1895,6 +2133,8 @@ function instantiateExpansion(recipe: Recipe, modelId: string, cfg: AIGatewayCon
+@@ -2003,6 +2241,8 @@ function instantiateExpansion(recipe: Recipe, modelId: string, cfg: AIGatewayCon
          ...auth,
        }).languageModel(modelId);
      }
@@ -298,7 +298,7 @@ index 05ac7a7b..67832b62 100644
    }
  }
 
-@@ -1902,6 +2142,27 @@ const ExpansionSchema = z.object({
+@@ -2010,6 +2250,27 @@ const ExpansionSchema = z.object({
    queries: z.array(z.string()).min(1).max(5),
  });
 
@@ -326,7 +326,7 @@ index 05ac7a7b..67832b62 100644
  /**
   * Expand a search query into up to 4 related queries.
   * Returns the original query PLUS expansions. On failure, returns just the original.
-@@ -1913,6 +2174,27 @@ export async function expand(query: string): Promise<string[]> {
+@@ -2021,6 +2282,27 @@ export async function expand(query: string): Promise<string[]> {
 
    try {
      const { model, recipe, modelId } = await resolveExpansionProvider(getExpansionModel());
@@ -354,7 +354,7 @@ index 05ac7a7b..67832b62 100644
      const result = await generateObject({
        model,
        schema: ExpansionSchema,
-@@ -2097,6 +2379,35 @@ export interface ChatOpts {
+@@ -2205,6 +2487,35 @@ export interface ChatOpts {
    cacheSystem?: boolean;
  }
 
@@ -390,7 +390,7 @@ index 05ac7a7b..67832b62 100644
  async function resolveChatProvider(modelStr: string): Promise<{ model: any; recipe: Recipe; modelId: string }> {
    const { parsed, recipe } = resolveRecipe(modelStr);
    assertTouchpoint(recipe, 'chat', parsed.modelId, getExtendedModelsForProvider(parsed.providerId));
-@@ -2140,6 +2451,8 @@ function instantiateChat(recipe: Recipe, modelId: string, cfg: AIGatewayConfig):
+@@ -2248,6 +2559,8 @@ function instantiateChat(recipe: Recipe, modelId: string, cfg: AIGatewayConfig):
          ...auth,
        }).languageModel(modelId);
      }
@@ -399,7 +399,7 @@ index 05ac7a7b..67832b62 100644
      default:
        throw new AIConfigError(`Unknown implementation: ${(recipe as any).implementation}`);
    }
-@@ -2275,6 +2588,42 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
+@@ -2383,6 +2696,42 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
      }
    };
 
@@ -442,147 +442,6 @@ index 05ac7a7b..67832b62 100644
    try {
      const result = await generateText({
        model,
-diff --git a/src/core/ai/recipes/index.ts b/src/core/ai/recipes/index.ts
-index 244f00e8..605eed01 100644
---- a/src/core/ai/recipes/index.ts
-+++ b/src/core/ai/recipes/index.ts
-@@ -22,6 +22,7 @@ import { dashscope } from './dashscope.ts';
- import { zhipu } from './zhipu.ts';
- import { azureOpenAI } from './azure-openai.ts';
- import { zeroentropyai } from './zeroentropyai.ts';
-+import { codex } from './codex.ts';
-
- const ALL: Recipe[] = [
-   openai,
-@@ -40,6 +41,7 @@ const ALL: Recipe[] = [
-   zhipu,
-   azureOpenAI,
-   zeroentropyai,
-+  codex,
- ];
-
- /** Map from `provider:id` key to recipe. */
-diff --git a/src/core/ai/types.ts b/src/core/ai/types.ts
-index bb8fe76b..aa1e4b58 100644
---- a/src/core/ai/types.ts
-+++ b/src/core/ai/types.ts
-@@ -22,7 +22,8 @@ export type Implementation =
-   | 'native-openai'
-   | 'native-google'
-   | 'native-anthropic'
--  | 'openai-compatible';
-+  | 'openai-compatible'
-+  | 'codex-cli';
-
- export interface EmbeddingTouchpoint {
-   models: string[];
-diff --git a/src/core/cycle/synthesize.ts b/src/core/cycle/synthesize.ts
-index 9828a4f3..f3e98767 100644
---- a/src/core/cycle/synthesize.ts
-+++ b/src/core/cycle/synthesize.ts
-@@ -26,7 +26,7 @@
-  *   - Daily token budget cap (cooldown bounds spend at v1 scale).
-  */
-
--import Anthropic from '@anthropic-ai/sdk';
-+import type Anthropic from '@anthropic-ai/sdk';
- import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
- import { join, dirname } from 'node:path';
- import type { BrainEngine } from '../engine.ts';
-@@ -38,6 +38,8 @@ import { discoverTranscripts, type DiscoveredTranscript } from './transcript-dis
- import { serializeMarkdown, serializePageToMarkdown } from '../markdown.ts';
- import type { Page, PageType } from '../types.ts';
- import { validateSourceId } from '../utils.ts';
-+import { chat as gatewayChat } from '../ai/gateway.ts';
-+import { AIConfigError } from '../ai/errors.ts';
-
- // Slug regex from validatePageSlug — kept in sync.
- // Used for the orchestrator-written summary index slug.
-@@ -293,10 +295,10 @@ export async function runPhaseSynthesize(
-       return ok('no transcripts to process', { transcripts_processed: 0, pages_written: 0 });
-     }
-
--    // Significance verdicts (cached in dream_verdicts; Haiku on miss).
-+    // Significance verdicts (cached in dream_verdicts; cheap model on miss).
-     const worthProcessing: DiscoveredTranscript[] = [];
-     const verdicts: Array<{ filePath: string; worth: boolean; reasons: string[]; cached: boolean }> = [];
--    const haiku = makeHaikuClient(); // null if no API key
-+    const judge = makeJudgeClient(config.verdictModel);
-     for (const t of transcripts) {
-       const cached = await engine.getDreamVerdict(t.filePath, t.contentHash);
-       if (cached) {
-@@ -304,15 +306,17 @@ export async function runPhaseSynthesize(
-         if (cached.worth_processing) worthProcessing.push(t);
-         continue;
-       }
--      if (!haiku) {
--        // No API key — can't judge. Skip with explicit reason; don't crash phase.
--        verdicts.push({ filePath: t.filePath, worth: false, reasons: ['no ANTHROPIC_API_KEY for significance judge'], cached: false });
--        continue;
-+      try {
-+        const verdict = await judgeSignificance(judge, t, config.verdictModel);
-+        await engine.putDreamVerdict(t.filePath, t.contentHash, verdict);
-+        verdicts.push({ filePath: t.filePath, worth: verdict.worth_processing, reasons: verdict.reasons, cached: false });
-+        if (verdict.worth_processing) worthProcessing.push(t);
-+      } catch (e) {
-+        const reason = e instanceof AIConfigError
-+          ? `significance judge unavailable: ${e.message}`
-+          : `significance judge failed: ${(e as Error).message}`;
-+        verdicts.push({ filePath: t.filePath, worth: false, reasons: [reason], cached: false });
-       }
--      const verdict = await judgeSignificance(haiku, t, config.verdictModel);
--      await engine.putDreamVerdict(t.filePath, t.contentHash, verdict);
--      verdicts.push({ filePath: t.filePath, worth: verdict.worth_processing, reasons: verdict.reasons, cached: false });
--      if (verdict.worth_processing) worthProcessing.push(t);
-     }
-
-     // Dry-run stops here: significance filter ran (Haiku verdicts cached),
-@@ -639,10 +643,41 @@ export interface JudgeClient {
-   create: (params: Anthropic.MessageCreateParamsNonStreaming) => Promise<Anthropic.Message>;
- }
-
--function makeHaikuClient(): JudgeClient | null {
--  if (!process.env.ANTHROPIC_API_KEY) return null;
--  const client = new Anthropic();
--  return { create: client.messages.create.bind(client.messages) };
-+function chatResultToJudgeMessage(text: string, model: string): Anthropic.Message {
-+  return {
-+    id: '',
-+    type: 'message',
-+    role: 'assistant',
-+    model,
-+    content: [{ type: 'text', text }],
-+    stop_reason: 'end_turn',
-+    stop_sequence: null,
-+    usage: { input_tokens: 0, output_tokens: 0 },
-+  } as Anthropic.Message;
-+}
-+
-+function makeJudgeClient(model: string): JudgeClient {
-+  const modelStr = model.includes(':') ? model : `anthropic:${model}`;
-+  return {
-+    create: async (params): Promise<Anthropic.Message> => {
-+      const messages = params.messages.map(m => ({
-+        role: m.role,
-+        content: typeof m.content === 'string'
-+          ? m.content
-+          : (Array.isArray(m.content) ? m.content.map(b => 'text' in b ? b.text : '').join('') : ''),
-+      }));
-+      const system = typeof params.system === 'string'
-+        ? params.system
-+        : (Array.isArray(params.system) ? params.system.map(b => 'text' in b ? b.text : '').join('') : undefined);
-+      const result = await gatewayChat({
-+        model: modelStr,
-+        system,
-+        messages,
-+        maxTokens: params.max_tokens,
-+      });
-+      return chatResultToJudgeMessage(result.text, modelStr);
-+    },
-+  };
- }
-
- interface VerdictResult {
 diff --git a/src/core/ai/recipes/codex.ts b/src/core/ai/recipes/codex.ts
 new file mode 100644
 index 00000000..4bb7b83c
@@ -625,6 +484,40 @@ index 00000000..4bb7b83c
 +  },
 +  setup_hint: 'Install and sign in to Codex CLI, then use models like `codex:gpt-5.5` for non-tool chat/synthesis jobs.',
 +};
+diff --git a/src/core/ai/recipes/index.ts b/src/core/ai/recipes/index.ts
+index 383350ff..f26a5d93 100644
+--- a/src/core/ai/recipes/index.ts
++++ b/src/core/ai/recipes/index.ts
+@@ -23,6 +23,7 @@ import { zhipu } from './zhipu.ts';
+ import { azureOpenAI } from './azure-openai.ts';
+ import { zeroentropyai } from './zeroentropyai.ts';
+ import { llamaServerReranker } from './llama-server-reranker.ts';
++import { codex } from './codex.ts';
+
+ const ALL: Recipe[] = [
+   openai,
+@@ -42,6 +43,7 @@ const ALL: Recipe[] = [
+   zhipu,
+   azureOpenAI,
+   zeroentropyai,
++  codex,
+ ];
+
+ /** Map from `provider:id` key to recipe. */
+diff --git a/src/core/ai/types.ts b/src/core/ai/types.ts
+index 79e4122e..e0039b3a 100644
+--- a/src/core/ai/types.ts
++++ b/src/core/ai/types.ts
+@@ -22,7 +22,8 @@ export type Implementation =
+   | 'native-openai'
+   | 'native-google'
+   | 'native-anthropic'
+-  | 'openai-compatible';
++  | 'openai-compatible'
++  | 'codex-cli';
+
+ export interface EmbeddingTouchpoint {
+   models: string[];
 diff --git a/test/ai/codex-cli-gateway.test.ts b/test/ai/codex-cli-gateway.test.ts
 new file mode 100644
 index 00000000..438097aa
