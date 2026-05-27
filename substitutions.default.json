@@ -73,6 +73,22 @@
       "find": "  if (supportedModels.length > 0 && !supportedModels.includes(modelId)) {\n    // Non-fatal: providers like ollama/litellm accept arbitrary model ids. We only warn for native providers.\n    if (recipe.tier === 'native') {",
       "replace": "  if (supportedModels.length > 0 && !supportedModels.includes(modelId)) {\n    // GBRAIN_PATCHKIT_ALLOW_ANTHROPIC_COMPAT_MODELS: ANTHROPIC_BASE_URL can point at MiniMax/Kimi/OpenClaw gateways.\n    if (recipe.id === 'anthropic' && process.env.ANTHROPIC_BASE_URL) return;\n    // Non-fatal: providers like ollama/litellm accept arbitrary model ids. We only warn for native providers.\n    if (recipe.tier === 'native') {",
       "disabled_by": "codex-overlay"
+    },
+    {
+      "name": "dream.patterns inherits subagent tier defaults",
+      "enabled": true,
+      "file": "src/core/cycle/patterns.ts",
+      "marker": "GBRAIN_PATCHKIT_DREAM_PATTERNS_SUBAGENT_TIER",
+      "find": "    tier: 'reasoning',\n    fallback: 'sonnet',",
+      "replace": "    // GBRAIN_PATCHKIT_DREAM_PATTERNS_SUBAGENT_TIER: patterns submit a subagent job, so inherit subagent-tier defaults.\n    tier: 'subagent',\n    fallback: 'sonnet',"
+    },
+    {
+      "name": "dream.patterns accepts gateway tool-loop providers",
+      "enabled": true,
+      "file": "src/core/cycle/patterns.ts",
+      "marker": "GBRAIN_PATCHKIT_DREAM_PATTERNS_GATEWAY_MODELS",
+      "find": "    // Submit one subagent for pattern detection.\n    if (!process.env.ANTHROPIC_API_KEY) {\n      return skipped('no_api_key', 'ANTHROPIC_API_KEY unset; pattern detection skipped');\n    }\n\n    const allowedSlugPrefixes = await loadAllowedSlugPrefixes();",
+      "replace": "    // Submit one subagent for pattern detection.\n    // GBRAIN_PATCHKIT_DREAM_PATTERNS_GATEWAY_MODELS: this phase uses a\n    // tool-calling subagent, so accept any configured provider that can run\n    // gateway.toolLoop() instead of requiring Anthropic specifically.\n    const { isAnthropicProvider } = await import('../model-config.ts');\n    const { classifyCapabilities } = await import('../ai/capabilities.ts');\n    const capability = classifyCapabilities(config.model);\n    if (capability === 'unusable:no_tools') {\n      return failed(makeError(\n        'ConfigError',\n        'MODEL_LACKS_TOOLS',\n        `models.dream.patterns=\"${config.model}\" cannot run pattern detection because it lacks native tool calling. Use a tool-capable chat model such as openai:gpt-4o-mini, deepseek:deepseek-chat, together:Qwen/Qwen2.5-72B-Instruct-Turbo, or openrouter:<provider>/<tool-capable-model>. Codex and Ollama are not valid for this phase.`,\n      ));\n    }\n    if (capability === 'unknown') {\n      return failed(makeError(\n        'ConfigError',\n        'UNKNOWN_MODEL_PROVIDER',\n        `models.dream.patterns=\"${config.model}\" does not resolve to a known chat/tool provider.`,\n        'Use provider:model, for example openai:gpt-4o-mini, deepseek:deepseek-chat, or together:Qwen/Qwen2.5-72B-Instruct-Turbo.',\n      ));\n    }\n    const isAnthropicModel = isAnthropicProvider(config.model);\n    const gatewayLoopRaw = await engine.getConfig('agent.use_gateway_loop').catch(() => null);\n    const gatewayLoopEnabled = gatewayLoopRaw === 'true' || gatewayLoopRaw === '1';\n    if (!isAnthropicModel && !gatewayLoopEnabled) {\n      return failed(makeError(\n        'ConfigError',\n        'GATEWAY_LOOP_DISABLED',\n        `models.dream.patterns=\"${config.model}\" is non-Anthropic, but agent.use_gateway_loop is not enabled.`,\n        'Run `gbrain config set agent.use_gateway_loop true` so subagents use the provider-neutral tool loop.',\n      ));\n    }\n    let hasAnthropicKey = !!process.env.ANTHROPIC_API_KEY;\n    if (!hasAnthropicKey && isAnthropicModel) {\n      try {\n        const { loadConfig } = await import('../config.ts');\n        hasAnthropicKey = !!loadConfig()?.anthropic_api_key;\n      } catch { /* first-run config may be unavailable */ }\n    }\n    if (isAnthropicModel && !hasAnthropicKey) {\n      return skipped(\n        'no_api_key',\n        `models.dream.patterns=\"${config.model}\" requires ANTHROPIC_API_KEY; set models.dream.patterns to a tool-capable non-Anthropic provider or set ANTHROPIC_API_KEY.`,\n      );\n    }\n\n    const allowedSlugPrefixes = await loadAllowedSlugPrefixes();"
     }
   ]
 }

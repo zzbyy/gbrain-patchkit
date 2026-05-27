@@ -119,6 +119,36 @@ gbrain config set models.dream.synthesize_verdict codex:gpt-5.5
 
 Do not point `models.subagent`, `models.tier.subagent`, `models.dream.synthesize`, or `models.dream.patterns` at Codex yet. Those paths need tool-call/subagent behavior that the CLI overlay intentionally does not claim.
 
+## Dream patterns without Anthropic
+
+`dream.patterns` writes durable `wiki/personal/patterns/<topic>` pages by
+submitting a gbrain subagent. That means it needs a chat model with native tool
+calling; Codex CLI chat and Ollama embeddings are not enough for this phase.
+
+Patchkit ships a source substitution that removes gbrain's stale
+`ANTHROPIC_API_KEY` hard gate from `src/core/cycle/patterns.ts` and lets the
+phase use any configured gateway tool-loop provider. Recommended choices:
+
+```bash
+gbrain config set agent.use_gateway_loop true
+
+# OpenAI API
+gbrain config set models.dream.patterns openai:gpt-4o-mini
+
+# DeepSeek API
+gbrain config set models.dream.patterns deepseek:deepseek-chat
+
+# Qwen through Together
+gbrain config set models.dream.patterns together:Qwen/Qwen2.5-72B-Instruct-Turbo
+
+# Or make every subagent-tier default follow the same provider
+gbrain config set models.tier.subagent deepseek:deepseek-chat
+```
+
+The patch also makes `dream.patterns` inherit `models.tier.subagent` when no
+per-task `models.dream.patterns` override is set, because this phase is a
+subagent/tool-loop job rather than ordinary reasoning chat.
+
 Smoke test after applying the overlay:
 
 ```bash
