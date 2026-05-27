@@ -10,8 +10,8 @@
 #   2. Seeds substitutions.json from the bundled default if not already present
 #   3. Ensures the tool is on PATH (adds to your shell rc)
 #   4. Installs a ~/.local/bin/gbrain command shim for non-interactive callers
-#   5. Runs the interactive onboarding wizard — prompts for keys, URL, models
-#   6. Applies the patches to your gbrain install
+#   5. Configures runtime override pointers without prompting for keys
+#   6. Applies the current overlay patch to your gbrain install
 #
 # Re-run-safe: won't overwrite an existing env.sh or substitutions.json.
 
@@ -64,15 +64,14 @@ if [ ! -f "$HOME_DIR/anthropic-override.js" ]; then
 fi
 
 # Existing-install path: if env.sh is already there but doesn't yet export
-# GBRAIN_ENTRY (the runtime-override marker), run migrate to wire it in
-# (idempotent + revert any active source patches). Fresh installs go through
-# onboard.
+# GBRAIN_ENTRY (the runtime-override marker), run migrate non-interactively to
+# wire it in. Fresh installs go through zero-input onboard.
 if [ -f "$HOME_DIR/env.sh" ] && ! grep -qE '^[[:space:]]*export[[:space:]]+GBRAIN_ENTRY=' "$HOME_DIR/env.sh" 2>/dev/null; then
   say ""
   say "[install] existing install detected without runtime-override config — running migrate"
-  exec "$HOME_DIR/bin/gbrain-patchkit" migrate
+  "$HOME_DIR/bin/gbrain-patchkit" migrate --non-interactive
 fi
 
-# Hand off to the onboard wizard (interactive)
+# Hand off to zero-input onboarding.
 say ""
 exec "$HOME_DIR/bin/gbrain-patchkit" onboard

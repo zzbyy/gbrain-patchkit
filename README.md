@@ -28,20 +28,14 @@ For query expansion through non-Anthropic providers, patchkit adds source-level 
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/zzbyy/gbrain-patchkit/main/install.sh)"
 ```
 
-The installer clones this repo into `~/.gbrain-patchkit/`, adds a PATH export + a `gbrain` shell wrapper to your `~/.zshrc` (or `~/.bashrc`), and launches an interactive onboarding wizard that asks you for:
+The installer clones this repo into `~/.gbrain-patchkit/`, adds a PATH export + a `gbrain` shell wrapper to your `~/.zshrc` (or `~/.bashrc`), installs the non-interactive `gbrain` shim, writes runtime override pointers, and applies the current overlay patch. It does not ask for API keys, provider URLs, or model names.
 
-1. **OpenAI API key** — for embeddings only. Create a [restricted key](https://platform.openai.com/api-keys) with just `Embeddings: Request` enabled. Required for vector search.
-2. **MiniMax API key** (or any other Anthropic-compatible provider key) — for query expansion and `gbrain agent run`. Optional; skip it and search still works (just without the expansion recall boost).
-3. **Anthropic-compatible base URL** — e.g. `https://api.minimaxi.chat/anthropic`. Verify the current endpoint in your provider's docs.
-4. **Model names** — the IDs to substitute for Claude-family direct Anthropic SDK calls.
-
-All four land in `~/.gbrain-patchkit/env.sh` with `600` perms. Nothing is sent anywhere.
+The current Codex CLI overlay uses your logged-in Codex CLI subscription and needs no OpenAI or Anthropic API key. If you later want optional Anthropic-compatible runtime substitutions or provider-specific embedding/expansion settings, edit `~/.gbrain-patchkit/env.sh` with `gbrain-patchkit env` or run `gbrain-patchkit onboard --interactive`.
 
 ## Prerequisites
 
 - `bash`, `git`, `python3` (all ship with macOS)
 - `gbrain` already installed somewhere on `PATH` (e.g. `bun install -g github:garrytan/gbrain`)
-- Optionally `curl` — used only to smoke-test your OpenAI key during onboarding
 
 ## How the runtime override works
 
@@ -83,7 +77,7 @@ Legacy fallbacks still work: `GBRAIN_EXPANSION_MODEL` for Haiku-shaped calls, `G
 
 The non-interactive command shim performs the same flow from an executable: it sources `~/.gbrain-patchkit/env.sh` in its own process, invokes `bun --preload <override> <cli.ts>` when runtime override metadata is present, and otherwise falls back to the native `gbrain` binary. This fixes callers that see `/Users/zz/.bun/bin/gbrain` directly because they never loaded `.zshrc`/`.bashrc`.
 
-The keys + model choices live in `env.sh`, scoped to the wrapper process so they don't leak into Claude Code, codex, or other Anthropic-SDK tools running in the same parent shell.
+Optional keys + model choices can live in `env.sh`, scoped to the wrapper process so they don't leak into Claude Code, codex, or other Anthropic-SDK tools running in the same parent shell. The default install writes only runtime pointers and stores no provider secrets.
 
 The runtime override does not modify `~/gbrain`. The enabled recipe patches do modify `~/gbrain/src/core/ai/recipes/*.ts`, but only through marker-based idempotent substitutions. After a successful `gbrain upgrade`, the wrapper runs `gbrain-patchkit post-upgrade` to refresh pointers and reapply enabled patches.
 
@@ -143,7 +137,9 @@ The source-patch mechanism is still available for code the runtime override cann
 ## Commands
 
 ```
-gbrain-patchkit onboard        interactive setup (keys, URL, models, env + hook + smoke test)
+gbrain-patchkit onboard        zero-input setup (env pointers + hook + shim + overlay)
+gbrain-patchkit onboard --interactive
+                              optional provider setup wizard (keys, URL, models)
 gbrain-patchkit migrate        switch existing source-patch installs to runtime override (idempotent)
 gbrain-patchkit post-upgrade   refresh runtime pointers + reapply enabled source patches
 gbrain-patchkit upgrade        stash → git pull ~/gbrain → bun install → pop → post-upgrade
@@ -200,7 +196,7 @@ export PATH="$HOME/.gbrain-patchkit/bin:$PATH"
 ├── substitutions.default.json   (shipped default substitutions)
 ├── patches/local-overlay.patch  (optional git overlay replayed after gbrain upgrades)
 ├── substitutions.json           (user's substitution config, seeded from default on install)
-├── env.sh                       (user's keys + models + runtime pointers, 600 perms, sourced from shell rc)
+├── env.sh                       (runtime pointers + optional provider env, 600 perms, sourced from shell rc)
 └── apply.log                    (append-only audit log for source-patch operations)
 ```
 
@@ -244,7 +240,7 @@ Caveat: source patches make the gbrain working tree dirty. Use `gbrain-patchkit 
 
 ## Scope & safety
 
-- **Local only.** Nothing in this tool phones home. The only outbound request is an optional OpenAI embedding smoke-test during `onboard`, using the key you just pasted.
+- **Local only.** Nothing in this tool phones home during zero-input setup. The optional `onboard --interactive` provider wizard may run an OpenAI embedding smoke-test only if you paste an OpenAI key there.
 - **Idempotent.** `apply` is safe to run any number of times. `revert` undoes only the substitutions the tool made.
 - **Atomic file writes.** Every patched file is written via a temp-file + rename.
 - **Secret hygiene.** `env.sh` is created with `umask 077` and `chmod 600`. It's sourced from your shell rc, not exported in scripts that Git tracks.
