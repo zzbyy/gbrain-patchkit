@@ -245,9 +245,10 @@ gbrain-patchkit overlay-snapshot   # capture current ~/gbrain diff into patches/
 gbrain-patchkit overlay-check      # applied / applicable / drifted
 gbrain-patchkit overlay-apply      # replay after git pull
 gbrain-patchkit overlay-revert     # reverse it
+gbrain-patchkit repair-upgrade     # repair known-safe conflicts from upgrade stash-pop
 ```
 
-`gbrain-patchkit post-upgrade` applies the overlay automatically when `patches/local-overlay.patch` exists. `gbrain-patchkit upgrade` first removes an already-applied overlay, pulls upstream on a clean base, then reapplies the overlay after the upgrade.
+`gbrain-patchkit post-upgrade` applies the overlay automatically when `patches/local-overlay.patch` exists. `gbrain-patchkit upgrade` first refuses to run when a previous merge/stash conflict is still unresolved, removes an already-applied overlay, pulls upstream on a clean base, then reapplies the overlay after the upgrade. If a stash-pop conflict leaves `skills/RESOLVER.md` with the usual `Updated upstream` / `Stashed changes` markers, run `gbrain-patchkit repair-upgrade` to keep both resolver rows and stage the resolution before rerunning `upgrade`.
 
 ```json
 {
@@ -302,6 +303,8 @@ Bun re-chmods `~/gbrain/src/cli.ts` from 644 → 755 on every `bun link`/`bun in
 Three ways to handle it:
 
 1. **`gbrain-patchkit upgrade`** (recommended) — runs the full ritual: stash any dirt, `git pull`, `bun install`, pop the stash, run `gbrain post-upgrade`. You never touch `~/gbrain` yourself. Use this in place of the manual `cd ~/gbrain && git pull && bun install && gbrain post-upgrade` sequence.
+
+   If the previous run left a merge/stash conflict, `upgrade` now stops before touching the overlay and prints the conflicted paths. For known-safe `skills/RESOLVER.md` resolver-table conflicts, run `gbrain-patchkit repair-upgrade`, review the staged fix, then rerun `gbrain-patchkit upgrade`.
 
 2. **One-time index fix** — `gbrain-patchkit migrate` offers it: `git -C ~/gbrain update-index --chmod=+x src/cli.ts`. After that, future bun installs find the index already aligned and stop reporting it as modified. This is the only place patchkit touches `~/gbrain`, and only with consent.
 
