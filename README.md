@@ -248,7 +248,9 @@ gbrain-patchkit overlay-revert     # reverse it
 gbrain-patchkit repair-upgrade     # repair known-safe conflicts from upgrade stash-pop
 ```
 
-`gbrain-patchkit post-upgrade` applies the overlay automatically when `patches/local-overlay.patch` exists. `gbrain-patchkit upgrade` first refuses to run when a previous merge/stash conflict is still unresolved, removes an already-applied overlay, pulls upstream on a clean base, then reapplies the overlay after the upgrade. If a stash-pop conflict leaves `skills/RESOLVER.md` with the usual `Updated upstream` / `Stashed changes` markers, run `gbrain-patchkit repair-upgrade` to keep both resolver rows and stage the resolution before rerunning `upgrade`.
+`gbrain-patchkit post-upgrade` applies the overlay automatically when `patches/local-overlay.patch` exists. `gbrain-patchkit upgrade` first refuses to run when a previous merge/stash conflict is still unresolved, removes an already-applied overlay, pulls upstream on a clean base, then reapplies the overlay after the upgrade. If a stash-pop conflict leaves a known-safe mechanical conflict, run `gbrain-patchkit repair-upgrade` to stage the resolution before rerunning `upgrade`. Current automatic repair rules cover `skills/RESOLVER.md` resolver-table unions, known `src/commands/doctor.ts` doctor-check overlay conflicts, `src/core/doctor-categories.ts` category-name unions, and upstream-wins repairs for the federated tag lookup / PGLite lock overlay hunks.
+
+`overlay-snapshot` captures tracked changes from `HEAD` plus untracked source artifacts under `src/`, `test/`, `tests/`, and `skills/`. It intentionally skips non-source untracked artifacts such as `.codegraph/` files and local backup archives so large generated files do not corrupt `local-overlay.patch`.
 
 ```json
 {
@@ -304,7 +306,7 @@ Three ways to handle it:
 
 1. **`gbrain-patchkit upgrade`** (recommended) — runs the full ritual: stash any dirt, `git pull`, `bun install`, pop the stash, run `gbrain post-upgrade`. You never touch `~/gbrain` yourself. Use this in place of the manual `cd ~/gbrain && git pull && bun install && gbrain post-upgrade` sequence.
 
-   If the previous run left a merge/stash conflict, `upgrade` now stops before touching the overlay and prints the conflicted paths. For known-safe `skills/RESOLVER.md` resolver-table conflicts, run `gbrain-patchkit repair-upgrade`, review the staged fix, then rerun `gbrain-patchkit upgrade`.
+   If the previous run left a merge/stash conflict, `upgrade` now stops before touching the overlay and prints the conflicted paths. For known-safe mechanical conflicts such as `skills/RESOLVER.md` resolver-table unions, `src/commands/doctor.ts` doctor-check overlay conflicts, `src/core/doctor-categories.ts` category-name unions, or the federated tag lookup / PGLite lock overlay hunks, run `gbrain-patchkit repair-upgrade`, review the staged fix, then rerun `gbrain-patchkit upgrade`.
 
 2. **One-time index fix** — `gbrain-patchkit migrate` offers it: `git -C ~/gbrain update-index --chmod=+x src/cli.ts`. After that, future bun installs find the index already aligned and stop reporting it as modified. This is the only place patchkit touches `~/gbrain`, and only with consent.
 

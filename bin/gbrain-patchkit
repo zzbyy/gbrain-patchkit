@@ -1049,9 +1049,17 @@ cmd_overlay_snapshot() {
   tmp="$(mktemp)"
   (
     cd "$src"
-    git diff --binary
+    git diff HEAD --binary
     while IFS= read -r f; do
       [ -n "$f" ] || continue
+      case "$f" in
+        src/*|test/*|tests/*|skills/*|package.json|bun.lock|bun.lockb|tsconfig.json)
+          ;;
+        *)
+          err "[overlay] skipping untracked non-source artifact: $f"
+          continue
+          ;;
+      esac
       git diff --binary --no-index -- /dev/null "$f" || true
     done < <(git ls-files --others --exclude-standard)
   ) > "$tmp"
@@ -1240,6 +1248,138 @@ repair_resolver_conflict() {
   git -C "$src" add "$path"
 }
 
+repair_known_overlay_conflict() {
+  local src="$1"
+  local path="$2"
+  local strategy="$3"
+  local file="$src/$path"
+  [ -f "$file" ] || return 1
+  grep -q '^<<<<<<< ' "$file" || return 1
+  grep -q '^>>>>>>> ' "$file" || return 1
+
+  local tmp
+  tmp="$(mktemp)"
+  if ! python3 - "$file" "$path" "$strategy" > "$tmp" <<'PY'
+import pathlib
+import re
+import sys
+
+file = pathlib.Path(sys.argv[1])
+path = sys.argv[2]
+strategy = sys.argv[3]
+text = file.read_text()
+
+conflict_re = re.compile(r"^<<<<<<< [^\n]*\n(.*?)^=======\n(.*?)^>>>>>>> [^\n]*(?:\n|$)", re.M | re.S)
+incoming_fs = "import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'fs';"
+current_fs = "import { existsSync, readFileSync, readdirSync, statSync } from 'fs';"
+
+def ensure_newline(s):
+    return s if s.endswith("\n") else s + "\n"
+
+def resolve_doctor(current, incoming):
+    # Older upgrade conflict: upstream added doctor imports while the overlay
+    # carried the fs realpathSync import. Keep upstream and splice in realpathSync.
+    if (
+        "extractEntityRefs" in current
+        and "buildVisibilityClause" in current
+        and incoming_fs in incoming
+    ):
+        replacement = current.replace(current_fs, incoming_fs, 1)
+        if incoming_fs not in replacement:
+            raise ValueError("doctor import conflict missing fs replacement")
+        return ensure_newline(replacement)
+
+    # Current upgrade conflict: upstream added context/reflex imports; stashed
+    # side was empty in that area.
+    if "reflexEnabled" in current and "resolveSocketPath" in current and "homedir" in current:
+        return ensure_newline(current)
+
+    # Current upgrade conflict: upstream broadened gateway-loop config parsing;
+    # stashed side still had the older true/1-only check.
+    if "gatewayLoopEnabled" in current and "useGatewayLoop" in incoming:
+        return ensure_newline(current)
+
+    raise ValueError("unknown doctor conflict shape")
+
+def resolve_union_lines(current, incoming):
+    merged = []
+    seen = set()
+    for line in current.splitlines() + incoming.splitlines():
+        if line not in seen:
+            seen.add(line)
+            merged.append(line)
+    return "\n".join(merged) + "\n"
+
+def resolve_keep_updated(current, incoming):
+    if path == "src/core/pglite-engine.ts":
+        ok = "sourceIds" in current and "SELECT DISTINCT tag" in current and "page_id IN" in current
+    elif path == "src/core/postgres-engine.ts":
+        ok = "SELECT DISTINCT tag" in current and "page_id IN" in current
+    elif path == "src/core/pglite-lock.ts":
+        ok = (
+            "HEARTBEAT_INTERVAL_MS" in current
+            or "stealGraceMs" in current
+            or "sinceRefresh" in current
+        )
+    else:
+        ok = False
+    if not ok:
+        raise ValueError(f"unknown keep-updated conflict shape in {path}")
+    return ensure_newline(current)
+
+def resolve_hunk(current, incoming):
+    if strategy == "doctor":
+        return resolve_doctor(current, incoming)
+    if strategy == "union-lines":
+        return resolve_union_lines(current, incoming)
+    if strategy == "keep-updated":
+        return resolve_keep_updated(current, incoming)
+    raise ValueError(f"unknown strategy {strategy}")
+
+parts = []
+pos = 0
+count = 0
+try:
+    for m in conflict_re.finditer(text):
+        current, incoming = m.group(1), m.group(2)
+        parts.append(text[pos:m.start()])
+        parts.append(resolve_hunk(current, incoming))
+        pos = m.end()
+        count += 1
+except ValueError:
+    sys.exit(1)
+
+if count == 0:
+    sys.exit(1)
+
+parts.append(text[pos:])
+new_text = "".join(parts)
+if "loadConfig(" in new_text and "import { gbrainPath, loadConfig } from '../core/config.ts';" not in new_text:
+    new_text = new_text.replace(
+        "import { gbrainPath } from '../core/config.ts';",
+        "import { gbrainPath, loadConfig } from '../core/config.ts';",
+        1,
+    )
+if "realpathSync(" in new_text and incoming_fs not in new_text:
+    new_text = new_text.replace(current_fs, incoming_fs, 1)
+if re.search(r"^(<<<<<<<|=======|>>>>>>>)", new_text, re.M):
+    sys.exit(1)
+sys.stdout.write(new_text)
+PY
+  then
+    rm -f "$tmp"
+    return 1
+  fi
+
+  if grep -qE '^(<<<<<<<|=======|>>>>>>>)' "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+
+  mv "$tmp" "$file"
+  git -C "$src" add "$path"
+}
+
 cmd_repair_upgrade() {
   local src
   if ! src="$(resolve_gbrain_src)"; then
@@ -1266,6 +1406,33 @@ cmd_repair_upgrade() {
       skills/RESOLVER.md)
         info "[repair-upgrade] repairing $path by keeping both conflict sides"
         if repair_resolver_conflict "$src"; then
+          repaired=1
+        else
+          err "[repair-upgrade] could not safely repair $path"
+          unsupported=1
+        fi
+        ;;
+      src/commands/doctor.ts)
+        info "[repair-upgrade] repairing $path by merging known-safe doctor overlay conflicts"
+        if repair_known_overlay_conflict "$src" "$path" doctor; then
+          repaired=1
+        else
+          err "[repair-upgrade] could not safely repair $path"
+          unsupported=1
+        fi
+        ;;
+      src/core/doctor-categories.ts)
+        info "[repair-upgrade] repairing $path by keeping both category names"
+        if repair_known_overlay_conflict "$src" "$path" union-lines; then
+          repaired=1
+        else
+          err "[repair-upgrade] could not safely repair $path"
+          unsupported=1
+        fi
+        ;;
+      src/core/pglite-engine.ts|src/core/pglite-lock.ts|src/core/postgres-engine.ts)
+        info "[repair-upgrade] repairing $path by keeping the updated upstream implementation"
+        if repair_known_overlay_conflict "$src" "$path" keep-updated; then
           repaired=1
         else
           err "[repair-upgrade] could not safely repair $path"
