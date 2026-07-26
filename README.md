@@ -118,6 +118,8 @@ The command applies the Codex overlay, saves `DEEPSEEK_API_KEY` in `~/.gbrain-pa
 
 It deliberately does not store the DeepSeek API key in GBrain config and does not route tool calls through Codex. This is the split that allows Dream patterns and subagents to keep their native DeepSeek tool loop while using the ChatGPT subscription for non-tool reasoning.
 
+The included overlay is verified for GBrain `0.42.65.0`. Patchkit refuses to apply it to another version rather than inserting a provider hook into an unknown upstream shape; update patchkit first after a GBrain release.
+
 ## Codex CLI overlay details
 
 `patches/local-overlay.patch` currently carries a narrow gbrain overlay that adds a first-class Codex CLI provider:

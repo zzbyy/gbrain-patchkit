@@ -1084,6 +1084,20 @@ overlay_forward_check() {
   git -C "$src" apply --unidiff-zero --check "$OVERLAY_PATCH" >/dev/null 2>&1
 }
 
+# The compact overlay intentionally uses zero-context hunks so it can add the
+# two new files without carrying unrelated upstream changes. Refuse an unknown
+# source release before applying those positional hunks; that makes upstream
+# drift loud instead of risking an insertion at the wrong location.
+require_overlay_base() {
+  local src="$1" version=""
+  [ -f "$src/VERSION" ] && version="$(tr -d '[:space:]' < "$src/VERSION")"
+  if [ "$version" != "0.42.65.0" ]; then
+    err "[overlay] unsupported gbrain version: ${version:-unknown}"
+    err "[overlay] this Codex overlay is verified for 0.42.65.0 only; update patchkit for your gbrain release."
+    return 3
+  fi
+}
+
 cmd_overlay_check() {
   local src
   src="$(resolve_gbrain_src)"
@@ -1095,6 +1109,8 @@ cmd_overlay_check() {
   info "[overlay] patch:  $OVERLAY_PATCH"
   if overlay_reverse_check "$src"; then
     info "[overlay] status: applied"
+  elif ! require_overlay_base "$src"; then
+    return $?
   elif overlay_forward_check "$src"; then
     info "[overlay] status: unpatched/applicable"
   else
@@ -1115,6 +1131,7 @@ cmd_overlay_apply() {
     info "[overlay] already applied"
     return 0
   fi
+  require_overlay_base "$src"
   info "[overlay] applying $OVERLAY_PATCH"
   if overlay_forward_check "$src"; then
     git -C "$src" apply --unidiff-zero --whitespace=nowarn "$OVERLAY_PATCH"
