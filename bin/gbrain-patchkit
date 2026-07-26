@@ -74,6 +74,23 @@ say()  { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
 info() { printf '%s\n' "$*"; }
 err()  { printf '%s\n' "$*" >&2; }
 
+# A shell parameter expansion is one command word: `${EDITOR:-open -t}` tries
+# to execute a binary literally named "open -t". Invoke macOS `open` and its
+# `-t` argument separately, while still allowing a simple $EDITOR override.
+open_in_editor() {
+  local file="$1"
+  if [ -n "${EDITOR:-}" ]; then
+    "$EDITOR" "$file"
+  elif command -v open >/dev/null 2>&1; then
+    open -t "$file"
+  elif command -v nano >/dev/null 2>&1; then
+    nano "$file"
+  else
+    err "No editor found. Set EDITOR to an editor command and re-run."
+    return 1
+  fi
+}
+
 # --- locate gbrain source ----------------------------------------------------
 
 resolve_gbrain_src() {
@@ -999,8 +1016,8 @@ cmd_revert() {
   local src; src="$(resolve_gbrain_src)"
   run_engine revert "$src" "$CONFIG" "$LOG" "$QUIET"
 }
-cmd_edit()    { ensure_config; "${EDITOR:-open -t}" "$CONFIG"; }
-cmd_env_cmd() { touch "$ENV_FILE"; chmod 600 "$ENV_FILE"; "${EDITOR:-open -t}" "$ENV_FILE"; }
+cmd_edit()    { ensure_config; open_in_editor "$CONFIG"; }
+cmd_env_cmd() { touch "$ENV_FILE"; chmod 600 "$ENV_FILE"; open_in_editor "$ENV_FILE"; }
 cmd_locate()  { resolve_gbrain_src; }
 
 cmd_update() {
