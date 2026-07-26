@@ -1,12 +1,13 @@
 # gbrain-patchkit
 
-Standalone companion tool for [gbrain](https://github.com/garrytan/gbrain) that lets you run Anthropic-shaped or provider-missing parts of gbrain through local replacement paths and keep those patches alive across upgrades.
+Standalone companion tool for [gbrain](https://github.com/garrytan/gbrain). It keeps a small Codex CLI overlay reproducible across GBrain upgrades and can write a native GBrain routing profile for Codex + DeepSeek.
 
 It uses three mechanisms:
 
-1. A Bun preload that redirects direct `@anthropic-ai/sdk` Messages calls to your Anthropic-compatible model endpoint, for MiniMax-style providers.
-2. Small idempotent source patches that add missing OpenAI-compatible expansion touchpoints to gbrain recipes, for DeepSeek and LiteLLM/Kimi/MiniMax proxy setups.
-3. A git overlay patch, `patches/local-overlay.patch`, for larger local gbrain changes such as the Codex CLI provider overlay.
+1. A Bun preload for legacy Anthropic-compatible integrations.
+2. Optional, disabled-by-default source substitutions for older upstream releases.
+3. A narrow git overlay, `patches/local-overlay.patch`, that adds the `codex:` provider to current GBrain.
+4. `configure codex-deepseek`, which stores only the DeepSeek secret in patchkit's private env file and writes all model routing through GBrain's native `gbrain config set` interface.
 
 ## Why this exists
 
@@ -95,7 +96,29 @@ export GBRAIN_EXPANSION_MODEL=litellm:minimax-m2.7
 
 Put those exports in `~/.gbrain-patchkit/env.sh` so they are scoped to `gbrain`.
 
-## Codex CLI overlay profile
+## Codex + DeepSeek profile (recommended)
+
+For a machine with a logged-in ChatGPT Pro / Codex CLI account and a DeepSeek API key, run this once after installing/updating patchkit:
+
+```bash
+DEEPSEEK_API_KEY='your-key' gbrain-patchkit configure codex-deepseek
+```
+
+Or, in an interactive terminal (the key is not echoed):
+
+```bash
+gbrain-patchkit configure codex-deepseek --prompt
+```
+
+The command applies the Codex overlay, saves `DEEPSEEK_API_KEY` in `~/.gbrain-patchkit/env.sh` with mode 600, and writes this native GBrain routing:
+
+- DeepSeek: `models.expansion`, `models.chat`, `models.subagent`, `models.tier.subagent`, `models.dream.patterns`, `models.dream.synthesize`, facts extraction, drift, and LLM evaluations.
+- Codex subscription: `models.think`, `models.auto_think`, and `models.dream.synthesize_verdict`.
+- `agent.use_gateway_loop=true`, required for non-Anthropic subagent/tool-loop flows.
+
+It deliberately does not store the DeepSeek API key in GBrain config and does not route tool calls through Codex. This is the split that allows Dream patterns and subagents to keep their native DeepSeek tool loop while using the ChatGPT subscription for non-tool reasoning.
+
+## Codex CLI overlay details
 
 `patches/local-overlay.patch` currently carries a narrow gbrain overlay that adds a first-class Codex CLI provider:
 
@@ -105,11 +128,11 @@ Put those exports in `~/.gbrain-patchkit/env.sh` so they are scoped to `gbrain`.
 - Supported: gateway chat, `think`, `auto_think`, and dream verdict/judge-style calls
 - Not supported in v1: tool calls, Minions/subagent loops, or any job that expects the model to call gbrain tools
 
-Recommended local model split:
+The profile command above is the preferred setup. Equivalent manual routes are:
 
 ```bash
 # Embeddings/rerank stay on ZeroEntropy via ~/.gbrain/config.json or ZEROENTROPY_API_KEY.
-gbrain config set models.expansion openai:gpt-4o-mini
+gbrain config set models.expansion deepseek:deepseek-chat
 
 # Heavy synthesis uses Codex CLI.
 gbrain config set models.think codex:gpt-5.5
