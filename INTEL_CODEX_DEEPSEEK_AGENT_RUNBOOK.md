@@ -34,10 +34,16 @@ Use this runbook when repairing or setting up GBrain on the user's Intel MacBook
 
 3. Confirm the GBrain version is exactly `0.42.65.0`. If not, stop and explain that patchkit needs an overlay refresh for that release.
 
-4. Ask the user to enter the DeepSeek key only into the terminal prompt, then run:
+4. Do **not** start `--prompt` in an agent-owned background terminal: the user may have no way to focus its hidden stdin. Instead, show the user this exact command and wait for them to run it in the macOS Terminal app themselves:
 
    ```bash
-   gbrain-patchkit configure codex-deepseek --prompt
+   cd ~/.gbrain-patchkit
+   ./bin/gbrain-patchkit configure codex-deepseek --prompt
+   ```
+
+   The user enters the key only at that Terminal prompt and reports completion. The agent may then continue with:
+
+   ```bash
    exec $SHELL -l
    gbrain-patchkit doctor
    ```
