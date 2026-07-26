@@ -120,6 +120,8 @@ It deliberately does not store the DeepSeek API key in GBrain config and does no
 
 The included overlay is verified for GBrain `0.42.65.0`. Patchkit refuses to apply it to another version rather than inserting a provider hook into an unknown upstream shape; update patchkit first after a GBrain release.
 
+For a coding agent operating the Intel Mac, use [the agent runbook](INTEL_CODEX_DEEPSEEK_AGENT_RUNBOOK.md). It gives the exact interactive flow and tells the agent when it must stop for the user's secret or paid-call consent.
+
 ## Codex CLI overlay details
 
 `patches/local-overlay.patch` currently carries a narrow gbrain overlay that adds a first-class Codex CLI provider:
