@@ -1763,6 +1763,9 @@ PY
   # tool-capable work; Codex subscription calls are limited to non-tool work.
   local routes=(
     "agent.use_gateway_loop true"
+    "models.tier.utility deepseek:deepseek-v4-flash"
+    "models.tier.reasoning deepseek:deepseek-v4-flash"
+    "models.tier.deep deepseek:deepseek-v4-flash"
     "models.expansion deepseek:deepseek-v4-flash"
     "models.chat deepseek:deepseek-v4-flash"
     "models.subagent deepseek:deepseek-v4-flash"

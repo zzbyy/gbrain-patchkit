@@ -52,6 +52,7 @@ Use this runbook when repairing or setting up GBrain on the user's Intel MacBook
 
    - DeepSeek `deepseek-v4-flash`: expansion, chat, facts, drift, evals, subagents, Dream patterns, Dream synthesis.
    - Codex `gpt-5.6`: think, auto-think, and Dream verdict/triage.
+   - Utility, reasoning, deep, and subagent tier fallbacks: DeepSeek `deepseek-v4-flash`.
    - `agent.use_gateway_loop=true`.
 
 5. Review doctor output. Configure OpenAI `text-embedding-3-small` separately for vector indexing/search. Its API supports shortened dimensions, including 1280, which preserves an existing 1280-wide vector schema. Do not configure ZeroEntropy, image, or mail/calendar integrations for this setup.
