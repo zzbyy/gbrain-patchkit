@@ -7,7 +7,7 @@ Use this runbook when repairing or setting up GBrain on the user's Intel MacBook
 - Do not modify GBrain source manually. Use `gbrain-patchkit` only.
 - Do not print, log, commit, or put `DEEPSEEK_API_KEY` in a command line visible to the conversation.
 - The patchkit stores that key only in `~/.gbrain-patchkit/env.sh`, mode `600`.
-- This overlay is deliberately pinned to GBrain `0.42.65.0`. If the installed version differs, stop before applying it and report the version; do not force the patch.
+- This overlay is deliberately pinned to GBrain `0.46.30.0`. If the installed version differs, stop before applying it and report the version; do not force the patch.
 - Codex is intentionally non-tool-only. DeepSeek must remain the provider for subagents and Dream patterns.
 
 ## Procedure
@@ -32,7 +32,7 @@ Use this runbook when repairing or setting up GBrain on the user's Intel MacBook
 
    Intel is expected to report `x86_64`. Bun and Codex CLI must both be installed; Codex CLI must already be logged in to the user's ChatGPT Pro account.
 
-3. Confirm the GBrain version is exactly `0.42.65.0`. If not, stop and explain that patchkit needs an overlay refresh for that release.
+3. Confirm the GBrain version is exactly `0.46.30.0`. If not, stop and explain that patchkit needs an overlay refresh for that release.
 
 4. Do **not** start `--prompt` in an agent-owned background terminal: the user may have no way to focus its hidden stdin. Instead, show the user this exact command and wait for them to run it in the macOS Terminal app themselves:
 
@@ -50,11 +50,11 @@ Use this runbook when repairing or setting up GBrain on the user's Intel MacBook
 
    The command installs/refreshes the patchkit shell hook, applies the Codex overlay, saves the DeepSeek key privately, and persists native GBrain routes:
 
-   - DeepSeek: expansion, chat, facts, drift, evals, subagents, Dream patterns, Dream synthesis.
-   - Codex: think, auto-think, and Dream verdict.
+   - DeepSeek `deepseek-v4-flash`: expansion, chat, facts, drift, evals, subagents, Dream patterns, Dream synthesis.
+   - Codex `gpt-5.6`: think, auto-think, and Dream verdict/triage.
    - `agent.use_gateway_loop=true`.
 
-5. Review doctor output. A missing ZeroEntropy embedding key means vector indexing/search is still unavailable; configure the existing embedding provider separately if that feature is needed. Do not configure image or mail/calendar integrations for this setup.
+5. Review doctor output. Configure OpenAI `text-embedding-3-small` separately for vector indexing/search. Its API supports shortened dimensions, including 1280, which preserves an existing 1280-wide vector schema. Do not configure ZeroEntropy, image, or mail/calendar integrations for this setup.
 
 6. Before issuing any live inference request, ask the user for consent because it consumes Codex subscription quota or DeepSeek API credits. With consent, smoke-test one Codex think call and one DeepSeek-backed operation, then report the exact result.
 

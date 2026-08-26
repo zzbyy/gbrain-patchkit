@@ -76,7 +76,9 @@
     },
     {
       "name": "dream.patterns inherits subagent tier defaults",
-      "enabled": true,
+      "enabled": false,
+      "disabled_by": "explicit-codex-deepseek-profile",
+      "force_default_policy": true,
       "file": "src/core/cycle/patterns.ts",
       "marker": "GBRAIN_PATCHKIT_DREAM_PATTERNS_SUBAGENT_TIER",
       "find": "    tier: 'reasoning',\n    fallback: 'sonnet',",
@@ -84,7 +86,9 @@
     },
     {
       "name": "dream.patterns accepts gateway tool-loop providers",
-      "enabled": true,
+      "enabled": false,
+      "disabled_by": "upstream-gbrain-0.46.30",
+      "force_default_policy": true,
       "file": "src/core/cycle/patterns.ts",
       "marker": "GBRAIN_PATCHKIT_DREAM_PATTERNS_GATEWAY_MODELS",
       "find": "    // Submit one subagent for pattern detection.\n    if (!process.env.ANTHROPIC_API_KEY) {\n      return skipped('no_api_key', 'ANTHROPIC_API_KEY unset; pattern detection skipped');\n    }\n\n    const allowedSlugPrefixes = await loadAllowedSlugPrefixes();",

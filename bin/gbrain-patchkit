@@ -348,7 +348,11 @@ for s in default.get("substitutions", []):
     if existing is not None:
         # Keep local policy fields, but refresh the patch body and drift-repair
         # metadata so installed configs can track upstream gbrain changes.
-        keep = {k: existing[k] for k in ("enabled", "disabled_by") if k in existing}
+        keep = (
+            {}
+            if s.get("force_default_policy")
+            else {k: existing[k] for k in ("enabled", "disabled_by") if k in existing}
+        )
         merged = dict(s)
         merged.update(keep)
         if existing != merged:
@@ -1108,9 +1112,9 @@ overlay_forward_check() {
 require_overlay_base() {
   local src="$1" version=""
   [ -f "$src/VERSION" ] && version="$(tr -d '[:space:]' < "$src/VERSION")"
-  if [ "$version" != "0.42.65.0" ]; then
+  if [ "$version" != "0.46.30.0" ]; then
     err "[overlay] unsupported gbrain version: ${version:-unknown}"
-    err "[overlay] this Codex overlay is verified for 0.42.65.0 only; update patchkit for your gbrain release."
+    err "[overlay] this Codex overlay is verified for 0.46.30.0 only; update patchkit for your gbrain release."
     return 3
   fi
 }
@@ -1759,19 +1763,20 @@ PY
   # tool-capable work; Codex subscription calls are limited to non-tool work.
   local routes=(
     "agent.use_gateway_loop true"
-    "models.expansion deepseek:deepseek-chat"
-    "models.chat deepseek:deepseek-chat"
-    "models.subagent deepseek:deepseek-chat"
-    "models.tier.subagent deepseek:deepseek-chat"
-    "models.dream.patterns deepseek:deepseek-chat"
-    "models.dream.synthesize deepseek:deepseek-chat"
-    "facts.extraction_model deepseek:deepseek-chat"
-    "models.drift deepseek:deepseek-chat"
-    "models.eval.longmemeval deepseek:deepseek-chat"
-    "models.eval.contradictions_judge deepseek:deepseek-chat"
-    "models.think codex:gpt-5.5"
-    "models.auto_think codex:gpt-5.5"
-    "models.dream.synthesize_verdict codex:gpt-5.5"
+    "models.expansion deepseek:deepseek-v4-flash"
+    "models.chat deepseek:deepseek-v4-flash"
+    "models.subagent deepseek:deepseek-v4-flash"
+    "models.tier.subagent deepseek:deepseek-v4-flash"
+    "models.dream.patterns deepseek:deepseek-v4-flash"
+    "models.dream.synthesize deepseek:deepseek-v4-flash"
+    "facts.extraction_model deepseek:deepseek-v4-flash"
+    "models.drift deepseek:deepseek-v4-flash"
+    "models.eval.longmemeval deepseek:deepseek-v4-flash"
+    "models.eval.contradictions_judge deepseek:deepseek-v4-flash"
+    "models.think codex:gpt-5.6"
+    "models.auto_think codex:gpt-5.6"
+    "models.dream.triage codex:gpt-5.6"
+    "models.dream.synthesize_verdict codex:gpt-5.6"
   )
   local route config_key config_value
   for route in "${routes[@]}"; do

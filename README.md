@@ -5,7 +5,7 @@ Run GBrain on a Mac without an Anthropic API key:
 - **Codex CLI / ChatGPT Pro** handles non-tool reasoning (`think`, `auto_think`, Dream verdict).
 - **DeepSeek API** handles chat, expansion, facts, subagents, and Dream patterns.
 
-The supported profile is GBrain **`0.42.65.0`**. Patchkit refuses to apply its Codex overlay to another version rather than modifying unknown upstream code.
+The supported profile is GBrain **`0.46.30.0`**. Patchkit refuses to apply its Codex overlay to another version rather than modifying unknown upstream code.
 
 ## What you normally do
 
@@ -26,7 +26,7 @@ exec $SHELL -l
 gbrain-patchkit doctor
 ```
 
-Requirements: an installed/logged-in `codex` CLI, Bun, and GBrain `0.42.65.0`. Intel Macs are supported (`uname -m` should be `x86_64`).
+Requirements: an installed/logged-in `codex` CLI, Bun, and GBrain `0.46.30.0`. Intel Macs are supported (`uname -m` should be `x86_64`).
 
 ## If you use an agent
 
@@ -47,11 +47,11 @@ It applies the Codex overlay and persists GBrain-native routing:
 
 | Workload | Provider |
 | --- | --- |
-| expansion, chat, facts, drift, evals | DeepSeek |
-| subagents, Dream patterns, Dream synthesis | DeepSeek + gateway loop |
-| think, auto-think, Dream verdict | Codex CLI subscription |
+| expansion, chat, facts, drift, evals | `deepseek:deepseek-v4-flash` |
+| subagents, Dream patterns, Dream synthesis | `deepseek:deepseek-v4-flash` + gateway loop |
+| think, auto-think, Dream verdict/triage | `codex:gpt-5.6` via Codex CLI subscription |
 
-It does not configure mail, calendar, or image features. Vector retrieval still needs your existing embedding provider (typically ZeroEntropy); `gbrain-patchkit doctor` will show if it is missing.
+It does not configure mail, calendar, image, or embedding providers. Vector retrieval needs a separately configured embedding provider; OpenAI `text-embedding-3-small` supports shortened dimensions such as 1280.
 
 ## Everyday commands
 

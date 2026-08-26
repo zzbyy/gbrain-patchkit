@@ -1,48 +1,249 @@
 diff --git a/src/core/ai/dims.ts b/src/core/ai/dims.ts
+index 29bf7e50..9bc19bb6 100644
 --- a/src/core/ai/dims.ts
 +++ b/src/core/ai/dims.ts
-@@ -201 +201,2 @@
+@@ -231,7 +231,9 @@ export function dimsProviderOptions(
+       return undefined;
+     }
+     case 'native-anthropic':
 -      // Anthropic has no embedding model.
++    case 'claude-cli':
 +    case 'codex-cli':
-+      // Anthropic and Codex CLI have no embedding model.
++      // Anthropic, Claude CLI, and Codex CLI have no embedding model.
+       return undefined;
+     case 'openai-compatible':
+       // ZE zembed-1 — flexible Matryoshka dims + asymmetric input_type.
 diff --git a/src/core/ai/gateway.ts b/src/core/ai/gateway.ts
+index 0c151f9a..4597e6ee 100644
 --- a/src/core/ai/gateway.ts
 +++ b/src/core/ai/gateway.ts
-@@ -2410,0 +2411,4 @@
+@@ -1620,6 +1620,10 @@ function instantiateEmbedding(recipe: Recipe, modelId: string, cfg: AIGatewayCon
+       throw new AIConfigError(
+         `claude-cli has no embedding model. Use openai or google for embeddings.`,
+       );
++    case 'codex-cli':
++      throw new AIConfigError(
++        `codex-cli has no embedding model. Use openai or google for embeddings.`,
++      );
+     case 'openai-compatible': {
+       // D12=A: unified auth via Recipe.resolveAuth (or default).
+       const auth = applyResolveAuth(recipe, cfg, 'embedding');
+@@ -2601,6 +2605,10 @@ function instantiateExpansion(recipe: Recipe, modelId: string, cfg: AIGatewayCon
+       const { ClaudeCliLanguageModel } = require('./providers/claude-cli-language-model.ts');
+       return new ClaudeCliLanguageModel(modelId);
+     }
 +    case 'codex-cli': {
 +      const { CodexCliLanguageModel } = require('./providers/codex-cli-language-model.ts');
 +      return new CodexCliLanguageModel(modelId);
 +    }
-@@ -2918,0 +2923,4 @@
+     case 'openai-compatible': {
+       // D12=A: unified auth via Recipe.resolveAuth (or default).
+       const auth = applyResolveAuth(recipe, cfg, 'expansion');
+@@ -3362,6 +3370,10 @@ function instantiateChat(recipe: Recipe, modelId: string, cfg: AIGatewayConfig):
+       const { ClaudeCliLanguageModel } = require('./providers/claude-cli-language-model.ts');
+       return new ClaudeCliLanguageModel(modelId);
+     }
 +    case 'codex-cli': {
 +      const { CodexCliLanguageModel } = require('./providers/codex-cli-language-model.ts');
 +      return new CodexCliLanguageModel(modelId);
 +    }
+     case 'openai-compatible': {
+       // D12=A: unified auth via Recipe.resolveAuth (or default).
+       const auth = applyResolveAuth(recipe, cfg, 'chat');
 diff --git a/src/core/ai/recipes/index.ts b/src/core/ai/recipes/index.ts
+index ab43ee4a..18bf678a 100644
 --- a/src/core/ai/recipes/index.ts
 +++ b/src/core/ai/recipes/index.ts
-@@ -31,0 +32 @@
+@@ -10,6 +10,7 @@ import { openai } from './openai.ts';
+ import { google } from './google.ts';
+ import { anthropic } from './anthropic.ts';
+ import { claudeCli } from './claude-cli.ts';
 +import { codex } from './codex.ts';
-@@ -56,0 +58 @@
+ import { ollama } from './ollama.ts';
+ import { openrouter } from './openrouter.ts';
+ import { voyage } from './voyage.ts';
+@@ -36,6 +37,7 @@ const ALL: Recipe[] = [
+   google,
+   anthropic,
+   claudeCli,
 +  codex,
+   ollama,
+   openrouter,
+   voyage,
 diff --git a/src/core/ai/types.ts b/src/core/ai/types.ts
+index b9846ccb..75ab3231 100644
 --- a/src/core/ai/types.ts
 +++ b/src/core/ai/types.ts
-@@ -26 +26,2 @@
+@@ -23,7 +23,8 @@ export type Implementation =
+   | 'native-google'
+   | 'native-anthropic'
+   | 'openai-compatible'
 -  | 'claude-cli';
 +  | 'claude-cli'
 +  | 'codex-cli';
+ 
+ export interface EmbeddingTouchpoint {
+   models: string[];
+diff --git a/src/core/ai/providers/codex-cli-language-model.ts b/src/core/ai/providers/codex-cli-language-model.ts
+new file mode 100644
+index 00000000..faebbe3d
+--- /dev/null
++++ b/src/core/ai/providers/codex-cli-language-model.ts
+@@ -0,0 +1,141 @@
++import { spawn } from 'node:child_process';
++import { mkdtemp, readFile, rm } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import type {
++  LanguageModelV2,
++  LanguageModelV2CallOptions,
++  LanguageModelV2Content,
++  LanguageModelV2Message,
++  LanguageModelV2Prompt,
++} from '@ai-sdk/provider';
++
++function codexBin(): string {
++  return process.env.GBRAIN_CODEX_BIN ?? 'codex';
++}
++
++function renderPrompt(prompt: LanguageModelV2Prompt): string {
++  const rendered: string[] = [];
++  for (const message of prompt as ReadonlyArray<LanguageModelV2Message>) {
++    if (message.role === 'system') {
++      rendered.push(`<system>\n${message.content}\n</system>`);
++      continue;
++    }
++    const content = message.content
++      .map(part => {
++        if (part.type === 'text') return part.text;
++        if (part.type === 'file') return `[file ${part.mediaType ?? 'unknown'} omitted]`;
++        if (part.type === 'tool-call') return `[tool call ${part.toolName}: ${part.input}]`;
++        if (part.type === 'tool-result') {
++          return `[tool result ${typeof part.output === 'string' ? part.output : JSON.stringify(part.output)}]`;
++        }
++        return '';
++      })
++      .filter(Boolean)
++      .join('\n');
++    if (content) rendered.push(`<message role="${message.role}">\n${content}\n</message>`);
++  }
++  return [
++    'You are a non-tool reasoning model inside GBrain. Follow the supplied messages and return only the requested final answer.',
++    ...rendered,
++  ].join('\n\n');
++}
++
++async function runCodex(prompt: string, model: string, signal?: AbortSignal): Promise<string> {
++  const cwd = await mkdtemp(join(tmpdir(), 'gbrain-codex-cli-'));
++  const outputPath = join(cwd, 'last-message.txt');
++  try {
++    return await new Promise<string>((resolve, reject) => {
++      const child = spawn(codexBin(), [
++        'exec',
++        '--ephemeral',
++        '--model', model,
++        '--sandbox', 'read-only',
++        '--skip-git-repo-check',
++        '--ignore-user-config',
++        '--ignore-rules',
++        '--color', 'never',
++        '--output-last-message', outputPath,
++        '-',
++      ], {
++        cwd,
++        env: { ...process.env, GBRAIN_CODEX_BRIDGE_DEPTH: '1' },
++        stdio: ['pipe', 'ignore', 'pipe'],
++      });
++
++      let stderr = '';
++      child.stderr.on('data', chunk => { stderr += String(chunk); });
++      const onAbort = () => child.kill('SIGTERM');
++      if (signal) signal.addEventListener('abort', onAbort, { once: true });
++
++      child.on('error', err => {
++        if (signal) signal.removeEventListener('abort', onAbort);
++        reject(new Error(`codex CLI spawn failed: ${err.message}`));
++      });
++      child.on('close', async code => {
++        if (signal) signal.removeEventListener('abort', onAbort);
++        try {
++          if (signal?.aborted) throw new Error('codex CLI request aborted');
++          if (code !== 0) throw new Error(`codex exec exited ${code}: ${stderr.trim()}`);
++          const text = (await readFile(outputPath, 'utf8')).trim();
++          if (!text) throw new Error('codex exec returned no final message');
++          resolve(text);
++        } catch (err) {
++          reject(err);
++        }
++      });
++      child.stdin.on('error', () => {});
++      child.stdin.end(prompt);
++    });
++  } finally {
++    await rm(cwd, { recursive: true, force: true });
++  }
++}
++
++function normalizeModel(model: string): string {
++  const idx = model.indexOf(':');
++  return idx >= 0 ? model.slice(idx + 1) : model;
++}
++
++export class CodexCliLanguageModel implements LanguageModelV2 {
++  readonly specificationVersion = 'v2' as const;
++  readonly provider = 'codex-cli';
++  readonly modelId: string;
++  readonly supportedUrls = {};
++
++  constructor(modelId: string) {
++    this.modelId = normalizeModel(modelId);
++  }
++
++  async doGenerate(options: LanguageModelV2CallOptions): Promise<{
++    content: LanguageModelV2Content[];
++    finishReason: 'stop';
++    usage: {
++      inputTokens: undefined;
++      outputTokens: undefined;
++      totalTokens: undefined;
++      cachedInputTokens: undefined;
++    };
++    warnings: never[];
++  }> {
++    if (options.tools?.length) {
++      throw new Error('Codex CLI provider does not support GBrain tool calls; route this task to DeepSeek.');
++    }
++    const text = await runCodex(renderPrompt(options.prompt), this.modelId, options.abortSignal);
++    return {
++      content: [{ type: 'text', text }],
++      finishReason: 'stop',
++      usage: {
++        inputTokens: undefined,
++        outputTokens: undefined,
++        totalTokens: undefined,
++        cachedInputTokens: undefined,
++      },
++      warnings: [],
++    };
++  }
++
++  async doStream(): Promise<never> {
++    throw new Error('Codex CLI LanguageModel does not support streaming.');
++  }
++}
 diff --git a/src/core/ai/recipes/codex.ts b/src/core/ai/recipes/codex.ts
 new file mode 100644
+index 00000000..85db0d8c
 --- /dev/null
 +++ b/src/core/ai/recipes/codex.ts
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,29 @@
 +import type { Recipe } from '../types.ts';
 +
 +/**
-+ * Codex through the locally logged-in `codex` CLI. This is intentionally a
-+ * chat-only recipe: GBrain uses it for think and synthesis, while DeepSeek
-+ * remains the tool-capable provider for subagents and Dream patterns.
++ * Codex through the locally authenticated `codex` CLI. This recipe is
++ * intentionally chat-only and non-tool-capable: GBrain uses it for think and
++ * synthesis verdicts, while a gateway provider such as DeepSeek owns tool
++ * loops, subagents, and Dream patterns.
 + */
 +export const codex: Recipe = {
 +  id: 'codex',
@@ -52,86 +253,16 @@ new file mode 100644
 +  auth_env: { required: [] },
 +  touchpoints: {
 +    chat: {
-+      models: ['gpt-5.5', 'gpt-5', 'gpt-4o'],
++      models: ['gpt-5.6'],
 +      supports_tools: false,
 +      supports_subagent_loop: false,
 +      supports_prompt_cache: false,
-+      max_context_tokens: 200000,
++      max_context_tokens: 200_000,
++      default_timeout_ms: 120_000,
 +    },
 +  },
-+  aliases: { default: 'gpt-5.5' },
++  aliases: { default: 'gpt-5.6' },
 +  setup_hint:
 +    'Install Codex CLI and log in with your ChatGPT subscription. ' +
 +    'Set GBRAIN_CODEX_BIN when the `codex` command is not on PATH.',
 +};
-diff --git a/src/core/ai/providers/codex-cli-language-model.ts b/src/core/ai/providers/codex-cli-language-model.ts
-new file mode 100644
---- /dev/null
-+++ b/src/core/ai/providers/codex-cli-language-model.ts
-@@ -0,0 +1,66 @@
-+import { spawn } from 'node:child_process';
-+import { mkdtemp, readFile, rm } from 'node:fs/promises';
-+import { tmpdir } from 'node:os';
-+import { join } from 'node:path';
-+import type { LanguageModelV2, LanguageModelV2CallOptions, LanguageModelV2Content, LanguageModelV2Message, LanguageModelV2Prompt } from '@ai-sdk/provider';
-+
-+function codexBin(): string { return process.env.GBRAIN_CODEX_BIN ?? 'codex'; }
-+
-+function renderPrompt(prompt: LanguageModelV2Prompt): string {
-+  const rendered: string[] = [];
-+  for (const message of prompt as ReadonlyArray<LanguageModelV2Message>) {
-+    if (message.role === 'system') { rendered.push(`<system>\n${message.content}\n</system>`); continue; }
-+    const content = message.content.map(part => {
-+      if (part.type === 'text') return part.text;
-+      if (part.type === 'file') return `[file ${part.mediaType ?? 'unknown'} omitted]`;
-+      if (part.type === 'tool-call') return `[tool call ${part.toolName}: ${part.input}]`;
-+      if (part.type === 'tool-result') return `[tool result ${typeof part.output === 'string' ? part.output : JSON.stringify(part.output)}]`;
-+      return '';
-+    }).filter(Boolean).join('\n');
-+    if (content) rendered.push(`<message role="${message.role}">\n${content}\n</message>`);
-+  }
-+  return ['You are a non-tool reasoning model inside GBrain. Follow the supplied messages and return only the requested final answer.', ...rendered].join('\n\n');
-+}
-+
-+async function runCodex(prompt: string, model: string, signal?: AbortSignal): Promise<string> {
-+  const cwd = await mkdtemp(join(tmpdir(), 'gbrain-codex-'));
-+  return new Promise((resolve, reject) => {
-+    const outputPath = join(cwd, 'last-message.txt');
-+    const child = spawn(codexBin(), ['exec', '--ephemeral', '--model', model, '--sandbox', 'read-only', '--skip-git-repo-check', '--ignore-rules', '--output-last-message', outputPath, '-'], {
-+      cwd, env: { ...process.env, GBRAIN_CODEX_BRIDGE_DEPTH: '1' }, stdio: ['pipe', 'pipe', 'pipe'],
-+    });
-+    let stderr = '';
-+    child.stderr.on('data', chunk => { stderr += String(chunk); });
-+    const cleanup = async () => { await rm(cwd, { recursive: true, force: true }); };
-+    const onAbort = () => { child.kill('SIGTERM'); };
-+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
-+    child.on('error', async err => {
-+      if (signal) signal.removeEventListener('abort', onAbort);
-+      await cleanup(); reject(new Error(`codex CLI spawn failed: ${err.message}`));
-+    });
-+    child.on('close', async code => {
-+      if (signal) signal.removeEventListener('abort', onAbort);
-+      try {
-+        if (code !== 0) throw new Error(`codex exec exited ${code}: ${stderr.trim()}`);
-+        const text = (await readFile(outputPath, 'utf8')).trim();
-+        if (!text) throw new Error('codex exec returned no final message');
-+        resolve(text);
-+      } catch (err) { reject(err); } finally { await cleanup(); }
-+    });
-+    child.stdin.on('error', () => {});
-+    child.stdin.end(prompt);
-+  });
-+}
-+
-+export class CodexCliLanguageModel implements LanguageModelV2 {
-+  readonly specificationVersion = 'v2' as const;
-+  readonly provider = 'codex-cli';
-+  readonly supportedUrls = {};
-+  constructor(readonly modelId: string) {}
-+  async doGenerate(options: LanguageModelV2CallOptions): Promise<{ content: LanguageModelV2Content[]; finishReason: 'stop'; usage: { inputTokens: undefined; outputTokens: undefined; totalTokens: undefined }; warnings: never[] }> {
-+    if (options.tools?.length) throw new Error('Codex CLI provider does not support GBrain tool calls; route this task to DeepSeek.');
-+    const text = await runCodex(renderPrompt(options.prompt), this.modelId, options.abortSignal);
-+    return { content: [{ type: 'text', text }], finishReason: 'stop', usage: { inputTokens: undefined, outputTokens: undefined, totalTokens: undefined }, warnings: [] };
-+  }
-+  async doStream(): Promise<never> { throw new Error('Codex CLI LanguageModel does not support streaming.'); }
-+}
