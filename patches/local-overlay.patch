@@ -84,6 +84,92 @@ index b9846ccb..75ab3231 100644
  
  export interface EmbeddingTouchpoint {
    models: string[];
+diff --git a/src/core/transcripts/render.ts b/src/core/transcripts/render.ts
+index b2eaefe9..a9573483 100644
+--- a/src/core/transcripts/render.ts
++++ b/src/core/transcripts/render.ts
+@@ -90,6 +90,8 @@ export interface RedactedSession {
+   session: ParsedSession;
+   redactionCount: number;
+   imperativesFlagged: number;
++  /** PostgreSQL text cannot store NUL; count visible U+FFFD substitutions. */
++  invalidCharsReplaced: number;
+ }
+ 
+ export type ImportRedactionPattern = { regex: RegExp; source: string };
+@@ -120,9 +122,17 @@ export function redactSession(
+   const patterns = opts.patterns ?? loadImportRedactionPatterns(opts.userPatternsPath);
+   let redactionCount = 0;
+   let imperativesFlagged = 0;
++  let invalidCharsReplaced = 0;
+ 
+   const clean = (text: string): string => {
+     let out = ensureWellFormed(text);
++    // SQLite-backed harnesses can contain embedded NUL bytes, but PostgreSQL
++    // rejects them in text/jsonb values. Preserve the location visibly rather
++    // than dropping content or aborting an otherwise valid full-store import.
++    out = out.replace(/\u0000/g, () => {
++      invalidCharsReplaced++;
++      return '\uFFFD';
++    });
+     const r = redactFindings(out);
+     redactionCount += r.redactions.length;
+     out = r.text;
+@@ -167,7 +177,12 @@ export function redactSession(
+     meta.raw = raw;
+   }
+ 
+-  return { session: { meta, messages }, redactionCount, imperativesFlagged };
++  return {
++    session: { meta, messages },
++    redactionCount,
++    imperativesFlagged,
++    invalidCharsReplaced,
++  };
+ }
+ 
+ // ── Rendering ────────────────────────────────────────────────────────────────
+@@ -237,7 +252,7 @@ export function renderSessionParts(
+   redacted: RedactedSession,
+   opts: { sourcePath: string } = { sourcePath: '' },
+ ): RenderSessionResult {
+-  const { session, imperativesFlagged } = redacted;
++  const { session, imperativesFlagged, invalidCharsReplaced } = redacted;
+   const { meta, messages } = session;
+   if (!messages.length) throw new Error('renderSessionParts: session has no messages');
+ 
+@@ -305,6 +320,7 @@ export function renderSessionParts(
+         part,
+         of,
+         ...(imperativesFlagged > 0 ? { imperatives_flagged: imperativesFlagged } : {}),
++        ...(invalidCharsReplaced > 0 ? { invalid_chars_replaced: invalidCharsReplaced } : {}),
+       },
+     };
+     const body = group.join('\n\n');
+diff --git a/test/transcript-render.test.ts b/test/transcript-render.test.ts
+index 9e41bf05..cabc2789 100644
+--- a/test/transcript-render.test.ts
++++ b/test/transcript-render.test.ts
+@@ -201,6 +201,19 @@ describe('redaction [fail-closed page lane]', () => {
+     expect(body.includes('\ud800')).toBe(false);
+     expect(body).toContain('broken');
+   });
++
++  test('embedded NUL bytes are replaced before PostgreSQL persist', () => {
++    const nul = session([
++      { role: 'user', timestamp: '2026-08-02T09:00:03.000Z', text: 'before\u0000after' },
++    ]);
++    const red = redactSession(nul, { userPatternsPath: '/nonexistent' });
++    expect(red.invalidCharsReplaced).toBe(1);
++    const rendered = renderSessionParts(red);
++    const content = rendered.parts[0].content;
++    expect(content.includes('\u0000')).toBe(false);
++    expect(content).toContain('before\uFFFDafter');
++    expect(frontmatter(content).transcript_import.invalid_chars_replaced).toBe(1);
++  });
+ });
+ 
+ describe('part splitting [embed-skip is the binding limit]', () => {
 diff --git a/src/core/ai/providers/codex-cli-language-model.ts b/src/core/ai/providers/codex-cli-language-model.ts
 new file mode 100644
 index 00000000..faebbe3d
