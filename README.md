@@ -49,11 +49,15 @@ It applies the Codex overlay and persists GBrain-native routing:
 | --- | --- |
 | expansion, chat, facts, drift, evals | `deepseek:deepseek-v4-flash` |
 | subagents, Dream patterns, Dream synthesis | `deepseek:deepseek-v4-flash` + gateway loop |
-| think, auto-think, Dream verdict/triage | `codex:gpt-5.6` via Codex CLI subscription |
+| think, auto-think, Dream verdict/triage | `codex:gpt-5.5` via Codex CLI subscription |
 
 The utility, reasoning, deep, and subagent tier fallbacks also resolve to
 `deepseek:deepseek-v4-flash`, so unlisted GBrain features do not fall back to
 Anthropic or a previously configured OpenRouter route.
+
+`gpt-5.5` is pinned because Codex CLI ChatGPT authentication on the supported
+host rejects `gpt-5.6`; the profile favors a verified working subscription
+route over an unavailable model slug.
 
 It does not configure mail, calendar, image, or embedding providers. Vector retrieval needs a separately configured embedding provider; OpenAI `text-embedding-3-small` supports shortened dimensions such as 1280.
 

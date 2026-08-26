@@ -233,7 +233,7 @@ index 00000000..faebbe3d
 +}
 diff --git a/src/core/ai/recipes/codex.ts b/src/core/ai/recipes/codex.ts
 new file mode 100644
-index 00000000..85db0d8c
+index 00000000..b5283c8d
 --- /dev/null
 +++ b/src/core/ai/recipes/codex.ts
 @@ -0,0 +1,29 @@
@@ -253,7 +253,7 @@ index 00000000..85db0d8c
 +  auth_env: { required: [] },
 +  touchpoints: {
 +    chat: {
-+      models: ['gpt-5.6'],
++      models: ['gpt-5.5'],
 +      supports_tools: false,
 +      supports_subagent_loop: false,
 +      supports_prompt_cache: false,
@@ -261,7 +261,7 @@ index 00000000..85db0d8c
 +      default_timeout_ms: 120_000,
 +    },
 +  },
-+  aliases: { default: 'gpt-5.6' },
++  aliases: { default: 'gpt-5.5' },
 +  setup_hint:
 +    'Install Codex CLI and log in with your ChatGPT subscription. ' +
 +    'Set GBRAIN_CODEX_BIN when the `codex` command is not on PATH.',

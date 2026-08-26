@@ -1776,10 +1776,10 @@ PY
     "models.drift deepseek:deepseek-v4-flash"
     "models.eval.longmemeval deepseek:deepseek-v4-flash"
     "models.eval.contradictions_judge deepseek:deepseek-v4-flash"
-    "models.think codex:gpt-5.6"
-    "models.auto_think codex:gpt-5.6"
-    "models.dream.triage codex:gpt-5.6"
-    "models.dream.synthesize_verdict codex:gpt-5.6"
+    "models.think codex:gpt-5.5"
+    "models.auto_think codex:gpt-5.5"
+    "models.dream.triage codex:gpt-5.5"
+    "models.dream.synthesize_verdict codex:gpt-5.5"
   )
   local route config_key config_value
   for route in "${routes[@]}"; do

@@ -51,7 +51,7 @@ Use this runbook when repairing or setting up GBrain on the user's Intel MacBook
    The command installs/refreshes the patchkit shell hook, applies the Codex overlay, saves the DeepSeek key privately, and persists native GBrain routes:
 
    - DeepSeek `deepseek-v4-flash`: expansion, chat, facts, drift, evals, subagents, Dream patterns, Dream synthesis.
-   - Codex `gpt-5.6`: think, auto-think, and Dream verdict/triage.
+   - Codex `gpt-5.5`: think, auto-think, and Dream verdict/triage. This is the verified ChatGPT-subscription model; `gpt-5.6` is rejected by the supported host's Codex CLI authentication.
    - Utility, reasoning, deep, and subagent tier fallbacks: DeepSeek `deepseek-v4-flash`.
    - `agent.use_gateway_loop=true`.
 
